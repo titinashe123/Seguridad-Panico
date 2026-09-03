@@ -1,0 +1,385 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
+import '../../../core/theme/app_theme.dart';
+import '../../../data/services/whatsapp_api_service.dart';
+import '../reports/new_report_view.dart';
+
+class EmergencyCountdownDialog extends StatefulWidget {
+  final String alertType;
+  final bool isDirectWhatsAppApi;
+
+  const EmergencyCountdownDialog({
+    super.key,
+    this.alertType = 'ROBO',
+    this.isDirectWhatsAppApi = true,
+  });
+
+  static Future<void> show(
+    BuildContext context, {
+    String alertType = 'ROBO',
+    bool isDirectWhatsAppApi = true,
+  }) {
+    return showDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierColor: Colors.black.withValues(alpha: 0.85),
+      builder: (_) => EmergencyCountdownDialog(
+        alertType: alertType,
+        isDirectWhatsAppApi: isDirectWhatsAppApi,
+      ),
+    );
+  }
+
+  @override
+  State<EmergencyCountdownDialog> createState() => _EmergencyCountdownDialogState();
+}
+
+class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
+    with SingleTickerProviderStateMixin {
+  int _secondsLeft = 5;
+  Timer? _timer;
+  final _pinController = TextEditingController();
+  late AnimationController _pulseController;
+
+  @override
+  void initState() {
+    super.initState();
+    _pulseController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1000),
+    )..repeat(reverse: true);
+
+    _startTimer();
+  }
+
+  void _startTimer() {
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (_secondsLeft > 1) {
+        setState(() {
+          _secondsLeft--;
+        });
+      } else {
+        _timer?.cancel();
+        _onAutoSend();
+      }
+    });
+  }
+
+  void _onAutoSend() async {
+    _timer?.cancel();
+    final parentContext = context;
+    Navigator.of(parentContext).pop();
+
+    if (widget.isDirectWhatsAppApi) {
+      // Envío automático vía API sin abrir el formulario ni la app de WhatsApp
+      await WhatsAppApiService.sendAutomatedEmergencyAlert(
+        category: widget.alertType,
+      );
+
+      if (parentContext.mounted) {
+        showDialog(
+          context: parentContext,
+          builder: (ctx) => AlertDialog(
+            backgroundColor: AppColors.surface,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+              side: const BorderSide(color: AppColors.accentGreen, width: 1.5),
+            ),
+            title: Row(
+              children: [
+                const Icon(Icons.check_circle, color: AppColors.accentGreen, size: 24),
+                const SizedBox(width: 8),
+                Text(
+                  'Reporte Enviado',
+                  style: GoogleFonts.inter(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.white,
+                  ),
+                ),
+              ],
+            ),
+            content: Text(
+              'El reporte fue enviado con éxito a la Central de Video Vigilancia.',
+              style: GoogleFonts.inter(fontSize: 14, color: AppColors.textSecondary),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: Text(
+                  'ENTENDIDO',
+                  style: GoogleFonts.inter(
+                    fontWeight: FontWeight.bold,
+                    color: AppColors.accentGreen,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        );
+      }
+    } else {
+      // Flujo opcional hacia el formulario detallado de reporte
+      if (parentContext.mounted) {
+        Navigator.of(parentContext).push(
+          MaterialPageRoute(
+            builder: (_) => NewReportView(initialCategory: widget.alertType),
+          ),
+        );
+      }
+    }
+  }
+
+  void _onCancel() {
+    _timer?.cancel();
+    Navigator.of(context).pop();
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Alerta cancelada por el usuario.'),
+        backgroundColor: AppColors.surfaceVariant,
+      ),
+    );
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    _pinController.dispose();
+    _pulseController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: SingleChildScrollView(
+        child: Dialog(
+          backgroundColor: Colors.transparent,
+          insetPadding: const EdgeInsets.symmetric(horizontal: 24),
+          child: Container(
+            padding: const EdgeInsets.all(24.0),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: AppColors.primaryRed,
+                width: 1.5,
+              ),
+              boxShadow: [
+                BoxShadow(
+                  color: AppColors.primaryRed.withValues(alpha: 0.25),
+                  blurRadius: 28,
+                  spreadRadius: 2,
+                ),
+              ],
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Warning Header
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF221A22),
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: AppColors.primaryRed.withValues(alpha: 0.4),
+                        ),
+                      ),
+                      child: const Icon(
+                        Icons.warning_amber_rounded,
+                        color: AppColors.primaryRed,
+                        size: 24,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Icon(
+                                Icons.warning_rounded,
+                                size: 13,
+                                color: Color(0xFFFF9800),
+                              ),
+                              const SizedBox(width: 4),
+                              Expanded(
+                                child: Text(
+                                  'ALERTA DE ${widget.alertType}',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w800,
+                                    color: const Color(0xFFFF9800),
+                                    letterSpacing: 0.8,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            'DETECTADO',
+                            style: GoogleFonts.inter(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w900,
+                              color: AppColors.primaryRed,
+                              letterSpacing: 0.8,
+                            ),
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            'Se enviará un reporte automático en:',
+                            style: GoogleFonts.inter(
+                              fontSize: 12,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+
+                const SizedBox(height: 28),
+
+                // Giant Circular Countdown
+                AnimatedBuilder(
+                  animation: _pulseController,
+                  builder: (context, child) {
+                    final scale = 1.0 + (_pulseController.value * 0.04);
+                    return Transform.scale(
+                      scale: scale,
+                      child: Container(
+                        width: 110,
+                        height: 110,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: const Color(0xFF0F1520),
+                          border: Border.all(
+                            color: AppColors.primaryRed,
+                            width: 3.5,
+                          ),
+                          boxShadow: [
+                            BoxShadow(
+                              color: AppColors.primaryRed.withValues(
+                                alpha: 0.3 + (_pulseController.value * 0.25),
+                              ),
+                              blurRadius: 20,
+                              spreadRadius: 3,
+                            ),
+                          ],
+                        ),
+                        child: Center(
+                          child: Text(
+                            '0$_secondsLeft',
+                            style: GoogleFonts.chakraPetch(
+                              fontSize: 40,
+                              fontWeight: FontWeight.w800,
+                              color: Colors.white,
+                              letterSpacing: 1.0,
+                            ),
+                          ),
+                        ),
+                      ),
+                    );
+                  },
+                ),
+
+                const SizedBox(height: 28),
+
+                // Cancel PIN input
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'CÓDIGO PARA CANCELAR ALERTA',
+                    style: GoogleFonts.inter(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.textSecondary,
+                      letterSpacing: 0.8,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: _pinController,
+                  keyboardType: TextInputType.number,
+                  textAlign: TextAlign.center,
+                  obscureText: true,
+                  obscuringCharacter: '•',
+                  style: GoogleFonts.inter(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 6,
+                    color: Colors.white,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: '----- [TECLADO NUMÉRICO]',
+                    hintStyle: GoogleFonts.inter(
+                      fontSize: 12,
+                      letterSpacing: 1.0,
+                      color: AppColors.textMuted,
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(vertical: 14, horizontal: 12),
+                  ),
+                ),
+
+                const SizedBox(height: 22),
+
+                // Cancel Button (Green)
+                ElevatedButton(
+                  onPressed: _onCancel,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.accentGreen,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    elevation: 4,
+                    shadowColor: AppColors.accentGreen.withValues(alpha: 0.4),
+                  ),
+                  child: Text(
+                    'CANCELAR ALERTA',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 12),
+
+                // Send Now Button (Outline Red)
+                OutlinedButton(
+                  onPressed: _onAutoSend,
+                  style: OutlinedButton.styleFrom(
+                    minimumSize: const Size.fromHeight(50),
+                    side: const BorderSide(color: AppColors.primaryRed, width: 1.5),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                  ),
+                  child: Text(
+                    'ENVIAR AHORA',
+                    style: GoogleFonts.inter(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w800,
+                      color: AppColors.primaryRed,
+                      letterSpacing: 1.0,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
