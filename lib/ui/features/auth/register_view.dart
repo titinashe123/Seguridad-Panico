@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/services/auth_service.dart';
 import '../navigation/main_layout_view.dart';
 
 class RegisterView extends StatefulWidget {
@@ -13,40 +14,309 @@ class RegisterView extends StatefulWidget {
 class _RegisterViewState extends State<RegisterView> {
   final _dniController = TextEditingController();
   final _dvController = TextEditingController();
-  final _nameController = TextEditingController();
+  final _firstNameController = TextEditingController();
+  final _lastNameController = TextEditingController();
   final _phoneController = TextEditingController();
   final _passwordController = TextEditingController();
   final _confirmPasswordController = TextEditingController();
+  final _pinController = TextEditingController();
 
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
   bool _acceptTerms = true;
+  bool _isLoading = false;
 
   @override
   void dispose() {
     _dniController.dispose();
     _dvController.dispose();
-    _nameController.dispose();
+    _firstNameController.dispose();
+    _lastNameController.dispose();
     _phoneController.dispose();
     _passwordController.dispose();
     _confirmPasswordController.dispose();
+    _pinController.dispose();
     super.dispose();
   }
 
-  void _onRegister() {
+  void _onRegister() async {
+    if (_isLoading) return;
+
+    final dni = _dniController.text.trim();
+    final firstName = _firstNameController.text.trim();
+    final lastName = _lastNameController.text.trim();
+    final phone = _phoneController.text.trim();
+    final password = _passwordController.text.trim();
+    final confirmPassword = _confirmPasswordController.text.trim();
+    final pin = _pinController.text.trim();
+
+    if (dni.isEmpty || dni.length < 8) {
+      _showError('Ingrese un número de DNI válido (mínimo 8 dígitos).');
+      return;
+    }
+    if (firstName.isEmpty) {
+      _showError('Por favor ingrese sus nombres.');
+      return;
+    }
+    if (lastName.isEmpty) {
+      _showError('Por favor ingrese sus apellidos.');
+      return;
+    }
+    if (phone.isEmpty || phone.length < 9) {
+      _showError('Ingrese un número de celular válido.');
+      return;
+    }
+    if (password.isEmpty || password.length < 6) {
+      _showError('La contraseña debe tener al menos 6 caracteres.');
+      return;
+    }
+    if (password != confirmPassword) {
+      _showError('Las contraseñas no coinciden.');
+      return;
+    }
+    if (pin.isEmpty || pin.length != 4) {
+      _showError('El PIN secreto debe ser de exactamente 4 dígitos.');
+      return;
+    }
     if (!_acceptTerms) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Debes aceptar las políticas de privacidad.'),
-          backgroundColor: AppColors.error,
-        ),
-      );
+      _showError('Debe aceptar las políticas de privacidad para continuar.');
       return;
     }
 
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const MainLayoutView()),
-      (route) => false,
+    setState(() => _isLoading = true);
+
+    // HU-SEG-01: Solicitar código OTP de 6 dígitos vía WhatsApp
+    final otpReq = await AuthService.requestOtp(dni: dni, phone: phone);
+
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    if (!otpReq.success) {
+      _showError(otpReq.errorMessage ?? 'No se pudo enviar el código de verificación.');
+      return;
+    }
+
+    // Abrir pantalla modal de ingreso de código de verificación
+    _showOtpVerificationDialog(
+      dni: dni,
+      firstName: firstName,
+      lastName: lastName,
+      phone: phone,
+      password: password,
+      pin: pin,
+    );
+  }
+
+  void _showOtpVerificationDialog({
+    required String dni,
+    required String firstName,
+    required String lastName,
+    required String phone,
+    required String password,
+    required String pin,
+  }) {
+    final otpController = TextEditingController();
+    bool isVerifying = false;
+    String? otpError;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogCtx) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: const BorderSide(color: AppColors.accentOrange, width: 1.5),
+              ),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppColors.accentOrange.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.security_rounded, color: AppColors.accentOrange, size: 22),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Verificación OTP',
+                      style: GoogleFonts.inter(
+                        fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'Hemos enviado un código de 6 dígitos a tu WhatsApp (+51 $phone) para validar tu identidad.',
+                    style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Icon(Icons.timer_outlined, size: 16, color: AppColors.accentOrange),
+                      const SizedBox(width: 6),
+                      Text(
+                        'Válido por: 5 minutos',
+                        style: GoogleFonts.chakraPetch(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.accentOrange,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: otpController,
+                    keyboardType: TextInputType.number,
+                    maxLength: 6,
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.inter(
+                      fontSize: 22,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 8,
+                      color: Colors.white,
+                    ),
+                    decoration: InputDecoration(
+                      hintText: '••••••',
+                      counterText: '',
+                      hintStyle: GoogleFonts.inter(letterSpacing: 6, color: AppColors.textMuted),
+                      errorText: otpError,
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogCtx).pop(),
+                  child: Text(
+                    'CANCELAR',
+                    style: GoogleFonts.inter(color: AppColors.textSecondary, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: isVerifying
+                      ? null
+                      : () async {
+                          final code = otpController.text.trim();
+                          if (code.length != 6) {
+                            setDialogState(() {
+                              otpError = 'Ingresa los 6 dígitos';
+                            });
+                            return;
+                          }
+
+                          setDialogState(() {
+                            isVerifying = true;
+                            otpError = null;
+                          });
+
+                          // 1. Verificar OTP
+                          final verifyRes = await AuthService.verifyOtp(
+                            dni: dni,
+                            phone: phone,
+                            code: code,
+                          );
+
+                          if (!verifyRes.success) {
+                            setDialogState(() {
+                              isVerifying = false;
+                              otpError = verifyRes.errorMessage ?? 'Código inválido o expirado';
+                            });
+                            return;
+                          }
+
+                          // 2. Registrar usuario en la base de datos con Bcrypt y JWT (HU-SEG-02, HU-SEG-06)
+                          final regResult = await AuthService.register(
+                            dni: dni,
+                            firstName: firstName,
+                            lastName: lastName,
+                            phone: phone,
+                            password: password,
+                            pin: pin,
+                            otpCode: code,
+                          );
+
+                          if (!dialogCtx.mounted) return;
+                          Navigator.of(dialogCtx).pop();
+
+                          if (regResult.success) {
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '¡Cuenta verificada y registrada exitosamente!',
+                                  style: GoogleFonts.inter(
+                                    color: Colors.white,
+                                    fontWeight: FontWeight.w600,
+                                    fontSize: 13,
+                                  ),
+                                ),
+                                backgroundColor: AppColors.accentGreen,
+                                behavior: SnackBarBehavior.floating,
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                duration: const Duration(seconds: 2),
+                              ),
+                            );
+                            Navigator.of(context).pushAndRemoveUntil(
+                              MaterialPageRoute(builder: (_) => const MainLayoutView()),
+                              (route) => false,
+                            );
+                          } else {
+                            _showError(regResult.errorMessage ?? 'Error al registrar.');
+                          }
+                        },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primaryRed,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: isVerifying
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2),
+                        )
+                      : Text(
+                          'CONFIRMAR',
+                          style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: Colors.white),
+                        ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: GoogleFonts.inter(
+            fontWeight: FontWeight.w600,
+            color: Colors.white,
+            fontSize: 13,
+          ),
+        ),
+        backgroundColor: AppColors.error,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
     );
   }
 
@@ -218,13 +488,27 @@ class _RegisterViewState extends State<RegisterView> {
 
                     const SizedBox(height: 18),
 
-                    // Nombres Completos
-                    _buildFieldLabel('NOMBRES COMPLETOS *'),
+                    // Nombres
+                    _buildFieldLabel('NOMBRES *'),
                     TextField(
-                      controller: _nameController,
+                      controller: _firstNameController,
+                      textCapitalization: TextCapitalization.words,
                       style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
                       decoration: const InputDecoration(
-                        hintText: 'Nombres y Apellidos',
+                        hintText: 'Ej. Juan Carlos',
+                      ),
+                    ),
+
+                    const SizedBox(height: 18),
+
+                    // Apellidos
+                    _buildFieldLabel('APELLIDOS *'),
+                    TextField(
+                      controller: _lastNameController,
+                      textCapitalization: TextCapitalization.words,
+                      style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+                      decoration: const InputDecoration(
+                        hintText: 'Ej. Pérez Mendoza',
                       ),
                     ),
 
@@ -287,6 +571,33 @@ class _RegisterViewState extends State<RegisterView> {
                               _obscureConfirmPassword = !_obscureConfirmPassword;
                             });
                           },
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 20),
+
+                    // Secret PIN Field
+                    _buildFieldLabel('PIN SECRETO DE SEGURIDAD (4 DÍGITOS) *'),
+                    TextField(
+                      controller: _pinController,
+                      keyboardType: TextInputType.number,
+                      maxLength: 4,
+                      obscureText: true,
+                      obscuringCharacter: '•',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: AppColors.textPrimary,
+                        letterSpacing: 6,
+                      ),
+                      decoration: const InputDecoration(
+                        hintText: '4 dígitos (ej. 1234)',
+                        counterText: '',
+                        prefixIcon: Icon(
+                          Icons.pin_outlined,
+                          color: AppColors.accentOrange,
+                          size: 20,
                         ),
                       ),
                     ),
@@ -364,22 +675,31 @@ class _RegisterViewState extends State<RegisterView> {
                         elevation: 6,
                         shadowColor: AppColors.primaryRed.withValues(alpha: 0.5),
                       ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          const Icon(Icons.shield_outlined, size: 20, color: Colors.white),
-                          const SizedBox(width: 8),
-                          Text(
-                            'REGISTRARME',
-                            style: GoogleFonts.inter(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 1.2,
-                              color: Colors.white,
+                      child: _isLoading
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                color: Colors.white,
+                                strokeWidth: 2.2,
+                              ),
+                            )
+                          : Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                const Icon(Icons.shield_outlined, size: 20, color: Colors.white),
+                                const SizedBox(width: 8),
+                                Text(
+                                  'REGISTRARME',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 1.2,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ),
-                        ],
-                      ),
                     ),
 
                     const SizedBox(height: 16),
@@ -409,32 +729,7 @@ class _RegisterViewState extends State<RegisterView> {
                       ),
                     ),
 
-                    const SizedBox(height: 36),
-
-                    // Footer AES-256
-                    Center(
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(
-                            Icons.lock_outline_rounded,
-                            size: 13,
-                            color: AppColors.textMuted,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            'SISTEMA DE RESPUESTA ENCRIPTADO AES-256',
-                            style: GoogleFonts.chakraPetch(
-                              fontSize: 10,
-                              color: AppColors.textMuted,
-                              letterSpacing: 1.2,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 24),
                   ],
                 ),
               ),

@@ -1,6 +1,10 @@
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:image_picker/image_picker.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/services/whatsapp_api_service.dart';
+import '../../../data/services/gps_location_service.dart';
 
 class NewReportView extends StatefulWidget {
   final String initialCategory;
@@ -16,15 +20,20 @@ class NewReportView extends StatefulWidget {
 
 class _NewReportViewState extends State<NewReportView> {
   final _descriptionController = TextEditingController();
-  final String _currentAddress = 'Av. de la Constitución 145';
-  double _lat = -12.04637;
-  double _lon = -77.02987;
+  String _currentAddress = 'Obteniendo GPS del dispositivo...';
+  double _lat = -13.71450;
+  double _lon = -76.20320;
   bool _isRefreshingGps = false;
+  bool _isSubmitting = false;
 
-  final List<String> _evidenceList = [
-    'placeholder_doc',
-    'night_photo',
-  ];
+  final List<XFile> _capturedImages = [];
+  final ImagePicker _picker = ImagePicker();
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshLocation();
+  }
 
   @override
   void dispose() {
@@ -32,43 +41,226 @@ class _NewReportViewState extends State<NewReportView> {
     super.dispose();
   }
 
-  void _refreshLocation() async {
+  Future<void> _refreshLocation() async {
     setState(() {
       _isRefreshingGps = true;
     });
-    await Future.delayed(const Duration(milliseconds: 600));
-    if (mounted) {
-      setState(() {
-        _lat = -12.04637 + (DateTime.now().millisecond % 50) * 0.00001;
-        _lon = -77.02987 + (DateTime.now().second % 50) * 0.00001;
-        _isRefreshingGps = false;
-      });
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Coordenadas GPS actualizadas con precisión militar.'),
-          backgroundColor: AppColors.surfaceVariant,
-          duration: Duration(seconds: 2),
-        ),
-      );
+
+    try {
+      final position = await GpsLocationService.getCurrentLocation();
+      if (mounted) {
+        if (position != null) {
+          setState(() {
+            _lat = position.latitude;
+            _lon = position.longitude;
+            _currentAddress = 'GPS Satelital Activo (Pisco)';
+            _isRefreshingGps = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                'Ubicación GPS exacta del dispositivo obtenida con éxito.',
+                style: GoogleFonts.inter(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+              backgroundColor: AppColors.surfaceElevated,
+              behavior: SnackBarBehavior.floating,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        } else {
+          setState(() {
+            _currentAddress = 'Pisco, Ica - Ubicación móvil';
+            _isRefreshingGps = false;
+          });
+        }
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _isRefreshingGps = false;
+        });
+      }
     }
   }
 
-  void _addEvidence() {
-    setState(() {
-      _evidenceList.add('new_evidence_${_evidenceList.length + 1}');
-    });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Evidencia adjuntada al reporte.'),
-        backgroundColor: AppColors.surfaceVariant,
-        duration: Duration(seconds: 1),
+  Future<void> _addEvidence() async {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        side: BorderSide(color: AppColors.border, width: 1),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                'ADJUNTAR EVIDENCIA FOTOGRÁFICA',
+                style: GoogleFonts.inter(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w800,
+                  color: const Color(0xFFFF6D00),
+                  letterSpacing: 1.0,
+                ),
+              ),
+              const SizedBox(height: 16),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: const Color(0xFFFF6D00).withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.camera_alt, color: Color(0xFFFF6D00)),
+                ),
+                title: Text(
+                  'Tomar Foto con la Cámara',
+                  style: GoogleFonts.inter(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                subtitle: Text(
+                  'Captura instantánea del suceso',
+                  style: GoogleFonts.inter(
+                    color: AppColors.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    final photo = await _picker.pickImage(
+                      source: ImageSource.camera,
+                      imageQuality: 85,
+                      maxWidth: 1920,
+                    );
+                    if (photo != null) {
+                      setState(() {
+                        _capturedImages.add(photo);
+                      });
+                    }
+                  } catch (e) {
+                    _showErrorSnackbar('Error al abrir la cámara: $e');
+                  }
+                },
+              ),
+              const Divider(color: AppColors.border),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: Colors.blueAccent.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.photo_library, color: Colors.blueAccent),
+                ),
+                title: Text(
+                  'Seleccionar de la Galería',
+                  style: GoogleFonts.inter(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                subtitle: Text(
+                  'Elegir fotos existentes del teléfono',
+                  style: GoogleFonts.inter(
+                    color: AppColors.textSecondary,
+                    fontSize: 12,
+                  ),
+                ),
+                onTap: () async {
+                  Navigator.pop(ctx);
+                  try {
+                    final photos = await _picker.pickMultiImage(
+                      imageQuality: 85,
+                      maxWidth: 1920,
+                    );
+                    if (photos.isNotEmpty) {
+                      setState(() {
+                        _capturedImages.addAll(photos);
+                      });
+                    }
+                  } catch (e) {
+                    _showErrorSnackbar('Error al abrir galería: $e');
+                  }
+                },
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
 
-  void _sendReportViaWhatsApp() {
+  void _removeEvidence(int index) {
+    setState(() {
+      _capturedImages.removeAt(index);
+    });
+  }
+
+  void _showErrorSnackbar(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          msg,
+          style: GoogleFonts.inter(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+            fontSize: 13,
+          ),
+        ),
+        backgroundColor: AppColors.error,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  void _sendReportViaWhatsApp() async {
+    if (_isSubmitting) return;
+
+    final customDesc = _descriptionController.text.trim();
+    final photoCount = _capturedImages.length;
+    final photoText = photoCount > 0 ? '\n📸 Evidencias: $photoCount fotografía(s) adjunta(s)' : '';
+
+    final mapLinks = '🗺️ Mapa en vivo: https://maps.google.com/?q=${_lat.toStringAsFixed(5)},${_lon.toStringAsFixed(5)}\n'
+        '🚗 Cómo llegar (Google Maps): https://www.google.com/maps/dir/?api=1&destination=${_lat.toStringAsFixed(5)},${_lon.toStringAsFixed(5)}';
+
+    final customMsg = customDesc.isNotEmpty
+        ? '⚠️ REPORTE CIUDADANO PERSONALIZADO ⚠️\n$customDesc$photoText\n📍 Ubicación GPS: $_currentAddress\n🛰️ Coordenadas: Lat ${_lat.toStringAsFixed(5)}, Lon ${_lon.toStringAsFixed(5)}\n$mapLinks\n🛡️ Despacho Central de Video Vigilancia.'
+        : '⚠️ REPORTE CIUDADANO PERSONALIZADO ⚠️$photoText\n📍 Ubicación GPS: $_currentAddress\n🛰️ Coordenadas: Lat ${_lat.toStringAsFixed(5)}, Lon ${_lon.toStringAsFixed(5)}\n$mapLinks\n🛡️ Despacho Central de Video Vigilancia.';
+
+    setState(() => _isSubmitting = true);
+
+    await WhatsAppApiService.sendAutomatedEmergencyAlert(
+      category: 'PERSONALIZADO',
+      customMessage: customMsg,
+      source: 'FORMULARIO PERSONALIZADO',
+      recipientNumber: WhatsAppApiService.defaultEmergencyRecipient,
+      imagePaths: _capturedImages.map((f) => f.path).toList(),
+      lat: _lat,
+      lon: _lon,
+      address: _currentAddress,
+    );
+
+    if (!mounted) return;
+    setState(() => _isSubmitting = false);
+
     showDialog(
       context: context,
+      barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppColors.surface,
         shape: RoundedRectangleBorder(
@@ -80,7 +272,7 @@ class _NewReportViewState extends State<NewReportView> {
             const Icon(Icons.check_circle, color: AppColors.accentGreen, size: 24),
             const SizedBox(width: 8),
             Text(
-              'Reporte Enviado',
+              'Reporte Registrado',
               style: GoogleFonts.inter(
                 fontSize: 18,
                 fontWeight: FontWeight.bold,
@@ -90,7 +282,7 @@ class _NewReportViewState extends State<NewReportView> {
           ],
         ),
         content: Text(
-          'El reporte fue enviado con éxito a la Central de Video Vigilancia.',
+          'El reporte fue registrado en el sistema y despachado a la Central de Video Vigilancia.',
           style: GoogleFonts.inter(fontSize: 14, color: AppColors.textSecondary),
         ),
         actions: [
@@ -242,7 +434,7 @@ class _NewReportViewState extends State<NewReportView> {
                       child: ListView(
                         scrollDirection: Axis.horizontal,
                         children: [
-                          // Add Button
+                          // Botón Añadir con Cámara o Galería
                           InkWell(
                             onTap: _addEvidence,
                             borderRadius: BorderRadius.circular(10),
@@ -253,7 +445,7 @@ class _NewReportViewState extends State<NewReportView> {
                                 color: AppColors.surface,
                                 borderRadius: BorderRadius.circular(10),
                                 border: Border.all(
-                                  color: AppColors.border,
+                                  color: const Color(0xFFFF6D00),
                                   width: 1.2,
                                 ),
                               ),
@@ -271,7 +463,7 @@ class _NewReportViewState extends State<NewReportView> {
                                     style: GoogleFonts.inter(
                                       fontSize: 10,
                                       fontWeight: FontWeight.w800,
-                                      color: AppColors.textSecondary,
+                                      color: const Color(0xFFFF6D00),
                                       letterSpacing: 0.8,
                                     ),
                                   ),
@@ -279,73 +471,96 @@ class _NewReportViewState extends State<NewReportView> {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 12),
 
-                          // Evidence Thumbnail 1 (white clean mock sheet)
-                          Container(
-                            width: 80,
-                            height: 80,
-                            decoration: BoxDecoration(
-                              color: Colors.white,
-                              borderRadius: BorderRadius.circular(10),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.white.withValues(alpha: 0.1),
-                                  blurRadius: 8,
-                                ),
-                              ],
-                            ),
-                            child: const Center(
-                              child: Icon(
-                                Icons.insert_drive_file_outlined,
-                                color: Color(0xFF64748B),
-                                size: 28,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-
-                          // Evidence Thumbnail 2 (night road tactical photo preview)
-                          Container(
-                            width: 80,
-                            height: 80,
-                            decoration: BoxDecoration(
-                              color: const Color(0xFF1B2230),
-                              borderRadius: BorderRadius.circular(10),
-                              border: Border.all(color: AppColors.border),
-                              gradient: const LinearGradient(
-                                colors: [Color(0xFF1E293B), Color(0xFF0F172A)],
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                              ),
-                            ),
-                            child: Stack(
-                              children: [
-                                const Center(
-                                  child: Icon(
-                                    Icons.car_crash_rounded,
-                                    color: Color(0xFF94A3B8),
-                                    size: 32,
-                                  ),
-                                ),
-                                Positioned(
-                                  bottom: 4,
-                                  left: 4,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-                                    decoration: BoxDecoration(
-                                      color: Colors.black.withValues(alpha: 0.7),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: const Text(
-                                      'CAM-01',
-                                      style: TextStyle(fontSize: 8, color: Colors.white70),
+                          // Renderizado dinámico de fotos reales capturadas
+                          ..._capturedImages.asMap().entries.map((entry) {
+                            final idx = entry.key;
+                            final xfile = entry.value;
+                            return Padding(
+                              padding: const EdgeInsets.only(left: 12),
+                              child: Stack(
+                                children: [
+                                  ClipRRect(
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: Container(
+                                      width: 80,
+                                      height: 80,
+                                      decoration: BoxDecoration(
+                                        color: const Color(0xFF1B2230),
+                                        borderRadius: BorderRadius.circular(10),
+                                        border: Border.all(color: AppColors.border),
+                                      ),
+                                      child: Image.file(
+                                        File(xfile.path),
+                                        fit: BoxFit.cover,
+                                        errorBuilder: (context, error, stackTrace) => const Center(
+                                          child: Icon(Icons.broken_image, color: Colors.grey, size: 24),
+                                        ),
+                                      ),
                                     ),
                                   ),
+                                  // Etiqueta táctica FOTO #N
+                                  Positioned(
+                                    bottom: 4,
+                                    left: 4,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                                      decoration: BoxDecoration(
+                                        color: Colors.black.withValues(alpha: 0.75),
+                                        borderRadius: BorderRadius.circular(4),
+                                      ),
+                                      child: Text(
+                                        'FOTO #${idx + 1}',
+                                        style: const TextStyle(fontSize: 8, color: Colors.white, fontWeight: FontWeight.bold),
+                                      ),
+                                    ),
+                                  ),
+                                  // Botón eliminar foto
+                                  Positioned(
+                                    top: 2,
+                                    right: 2,
+                                    child: GestureDetector(
+                                      onTap: () => _removeEvidence(idx),
+                                      child: Container(
+                                        padding: const EdgeInsets.all(3),
+                                        decoration: const BoxDecoration(
+                                          color: Colors.redAccent,
+                                          shape: BoxShape.circle,
+                                        ),
+                                        child: const Icon(Icons.close, color: Colors.white, size: 12),
+                                      ),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            );
+                          }),
+
+                          // Placeholder si no hay fotos todavía
+                          if (_capturedImages.isEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 12),
+                              child: Container(
+                                width: 160,
+                                height: 80,
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: AppColors.surface.withValues(alpha: 0.5),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(color: AppColors.border.withValues(alpha: 0.5)),
                                 ),
-                              ],
+                                child: Center(
+                                  child: Text(
+                                    'Toque AÑADIR para capturar fotos con la cámara o elegirlas de su galería',
+                                    textAlign: TextAlign.center,
+                                    style: GoogleFonts.inter(
+                                      fontSize: 10,
+                                      color: AppColors.textSecondary,
+                                    ),
+                                  ),
+                                ),
+                              ),
                             ),
-                          ),
                         ],
                       ),
                     ),
@@ -441,10 +656,11 @@ class _NewReportViewState extends State<NewReportView> {
 
                     // WhatsApp Action Button
                     ElevatedButton(
-                      onPressed: _sendReportViaWhatsApp,
+                      onPressed: _isSubmitting ? null : _sendReportViaWhatsApp,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.accentGreen,
                         foregroundColor: Colors.white,
+                        disabledBackgroundColor: AppColors.accentGreen.withValues(alpha: 0.6),
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10),
@@ -452,36 +668,45 @@ class _NewReportViewState extends State<NewReportView> {
                         elevation: 8,
                         shadowColor: AppColors.accentGreen.withValues(alpha: 0.4),
                       ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Container(
-                            width: 26,
-                            height: 26,
-                            decoration: const BoxDecoration(
-                              color: Colors.white,
-                              shape: BoxShape.circle,
-                            ),
-                            child: const Center(
-                              child: Icon(
-                                Icons.chat_bubble_outline_rounded,
-                                color: AppColors.accentGreen,
-                                size: 16,
+                      child: _isSubmitting
+                          ? const SizedBox(
+                              width: 22,
+                              height: 22,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2.5,
+                                color: Colors.white,
                               ),
+                            )
+                          : Row(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Container(
+                                  width: 26,
+                                  height: 26,
+                                  decoration: const BoxDecoration(
+                                    color: Colors.white,
+                                    shape: BoxShape.circle,
+                                  ),
+                                  child: const Center(
+                                    child: Icon(
+                                      Icons.chat_bubble_outline_rounded,
+                                      color: AppColors.accentGreen,
+                                      size: 16,
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(width: 10),
+                                Text(
+                                  'ENVIAR REPORTE VÍA WHATSAPP',
+                                  style: GoogleFonts.inter(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w800,
+                                    letterSpacing: 0.8,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ],
                             ),
-                          ),
-                          const SizedBox(width: 10),
-                          Text(
-                            'ENVIAR REPORTE VÍA WHATSAPP',
-                            style: GoogleFonts.inter(
-                              fontSize: 13,
-                              fontWeight: FontWeight.w800,
-                              letterSpacing: 0.8,
-                              color: Colors.white,
-                            ),
-                          ),
-                        ],
-                      ),
                     ),
 
                     const SizedBox(height: 48),

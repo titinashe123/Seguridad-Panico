@@ -4,7 +4,7 @@ import 'package:alerta_ciudadana/main.dart';
 void main() {
   testWidgets('Renders LoginView on app launch', (WidgetTester tester) async {
     // Build our app and trigger a frame.
-    await tester.pumpWidget(const AlertaCiudadanaApp());
+    await tester.pumpWidget(const AlertaCiudadanaApp(isLoggedIn: false));
 
     // Verify key elements from Figma Image 1 are present
     expect(find.text('AlertaCiudadana'), findsOneWidget);

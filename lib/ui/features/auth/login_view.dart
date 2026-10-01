@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../core/widgets/tactical_shield_logo.dart';
+import '../../../data/services/auth_service.dart';
 import 'register_view.dart';
 import '../navigation/main_layout_view.dart';
 
@@ -16,6 +17,7 @@ class _LoginViewState extends State<LoginView> {
   final _dniController = TextEditingController(text: '12345678');
   final _passwordController = TextEditingController(text: '12345678');
   bool _obscurePassword = true;
+  bool _isLoading = false;
 
   @override
   void dispose() {
@@ -24,10 +26,38 @@ class _LoginViewState extends State<LoginView> {
     super.dispose();
   }
 
-  void _onLogin() {
-    Navigator.of(context).pushReplacement(
-      MaterialPageRoute(builder: (_) => const MainLayoutView()),
+  void _onLogin() async {
+    if (_isLoading) return;
+    setState(() => _isLoading = true);
+
+    final result = await AuthService.login(
+      dni: _dniController.text,
+      password: _passwordController.text,
     );
+
+    if (!mounted) return;
+    setState(() => _isLoading = false);
+
+    if (result.success) {
+      Navigator.of(context).pushReplacement(
+        MaterialPageRoute(builder: (_) => const MainLayoutView()),
+      );
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            result.errorMessage ?? 'Error al iniciar sesión',
+            style: GoogleFonts.inter(
+              fontWeight: FontWeight.w600,
+              color: Colors.white,
+            ),
+          ),
+          backgroundColor: AppColors.error,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      );
+    }
   }
 
   @override
@@ -171,15 +201,24 @@ class _LoginViewState extends State<LoginView> {
                       elevation: 6,
                       shadowColor: AppColors.primaryRed.withValues(alpha: 0.5),
                     ),
-                    child: Text(
-                      'INICIAR SESIÓN',
-                      style: GoogleFonts.inter(
-                        fontSize: 15,
-                        fontWeight: FontWeight.w800,
-                        letterSpacing: 1.2,
-                        color: Colors.white,
-                      ),
-                    ),
+                    child: _isLoading
+                        ? const SizedBox(
+                            width: 22,
+                            height: 22,
+                            child: CircularProgressIndicator(
+                              color: Colors.white,
+                              strokeWidth: 2.2,
+                            ),
+                          )
+                        : Text(
+                            'INICIAR SESIÓN',
+                            style: GoogleFonts.inter(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 1.2,
+                              color: Colors.white,
+                            ),
+                          ),
                   ),
 
                   const SizedBox(height: 20),
@@ -188,24 +227,12 @@ class _LoginViewState extends State<LoginView> {
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      GestureDetector(
-                        onTap: () {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Enlace de recuperación enviado por SMS.'),
-                              backgroundColor: AppColors.surfaceVariant,
-                            ),
-                          );
-                        },
-                        child: Text(
-                          'Olvidé mi contraseña',
-                          style: GoogleFonts.inter(
-                            fontSize: 13,
-                            color: AppColors.accentOrange,
-                            fontWeight: FontWeight.w500,
-                            decoration: TextDecoration.underline,
-                            decorationColor: AppColors.accentOrange,
-                          ),
+                      Text(
+                        'Olvidé mi contraseña',
+                        style: GoogleFonts.inter(
+                          fontSize: 13,
+                          color: AppColors.textSecondary,
+                          fontWeight: FontWeight.w500,
                         ),
                       ),
                       GestureDetector(
@@ -220,7 +247,7 @@ class _LoginViewState extends State<LoginView> {
                           'Crear cuenta',
                           style: GoogleFonts.inter(
                             fontSize: 13,
-                            color: AppColors.textSecondary,
+                            color: AppColors.accentOrange,
                             fontWeight: FontWeight.w600,
                           ),
                         ),
@@ -228,33 +255,6 @@ class _LoginViewState extends State<LoginView> {
                     ],
                   ),
 
-                  const SizedBox(height: 90),
-
-                  // Military Encryption Footer
-                  Center(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        const Icon(
-                          Icons.verified_user_outlined,
-                          size: 15,
-                          color: AppColors.textMuted,
-                        ),
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Text(
-                            'Encriptación táctica de grado militar activa para reportes.',
-                            textAlign: TextAlign.center,
-                            style: GoogleFonts.inter(
-                              fontSize: 11,
-                              color: AppColors.textMuted,
-                              fontWeight: FontWeight.w400,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
                   const SizedBox(height: 24),
                 ],
               ),

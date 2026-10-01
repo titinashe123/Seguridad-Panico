@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/models/alert_category.dart';
+import '../../../data/services/sensor_emergency_service.dart';
+import '../../../data/services/hardware_trigger_service.dart';
+import '../../../data/services/location_tracking_service.dart';
+import '../../../data/services/session_service.dart';
 import '../emergency/emergency_countdown_dialog.dart';
 import '../reports/new_report_view.dart';
 
@@ -18,9 +22,14 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
 
+  final SensorEmergencyService _sensorService = SensorEmergencyService();
+  final HardwareTriggerService _hardwareService = HardwareTriggerService();
+  String _citizenName = '';
+
   @override
   void initState() {
     super.initState();
+    _loadCitizenInfo();
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1600),
@@ -29,11 +38,57 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
     _pulseAnimation = Tween<double>(begin: 0.95, end: 1.05).animate(
       CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
     );
+
+    _initHardwareAndSensors();
+  }
+
+  void _initHardwareAndSensors() {
+    // 1. Iniciar monitoreo continuo de Acelerómetro y Giroscopio
+    _sensorService.startMonitoring(
+      onTriggered: (reason, source) {
+        if (!mounted) return;
+        EmergencyCountdownDialog.show(
+          context,
+          alertType: 'ACCIDENTE',
+          source: 'SENSOR: $reason',
+          isDirectWhatsAppApi: true,
+        );
+      },
+    );
+
+    // 2. Iniciar escucha del botón físico de encendido (3 pulsaciones consecutivas) y servicio persistente
+    _hardwareService.initialize(
+      onTriggered: (source) {
+        if (!mounted) return;
+        EmergencyCountdownDialog.show(
+          context,
+          alertType: 'ROBO',
+          source: 'BOTÓN DE ENCENDIDO (3X)',
+          isDirectWhatsAppApi: true,
+        );
+      },
+      onOpenStopTrackingDialog: () {
+        if (!mounted) return;
+        _showStopTrackingDialog(context, LocationTrackingService());
+      },
+    );
+  }
+
+  void _loadCitizenInfo() async {
+    final data = await SessionService.getUserData();
+    final fullName = data['name'] ?? '';
+    final firstName = fullName.trim().split(' ').first;
+    if (mounted) {
+      setState(() {
+        _citizenName = firstName.isNotEmpty ? firstName : fullName;
+      });
+    }
   }
 
   @override
   void dispose() {
     _pulseController.dispose();
+    _sensorService.stopMonitoring();
     super.dispose();
   }
 
@@ -41,8 +96,159 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
     EmergencyCountdownDialog.show(
       context,
       alertType: 'ROBO',
+      source: 'BOTÓN ROJO PRINCIPAL',
       isDirectWhatsAppApi: true,
     );
+  }
+
+  static bool _isStopTrackingDialogOpen = false;
+
+  Future<void> _showStopTrackingDialog(
+    BuildContext context,
+    LocationTrackingService trackingService,
+  ) async {
+    if (_isStopTrackingDialogOpen) return;
+    _isStopTrackingDialogOpen = true;
+    final pinController = TextEditingController();
+    String? errorMessage;
+
+    try {
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) {
+          return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              backgroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: const BorderSide(color: AppColors.primaryRed, width: 1.5),
+              ),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppColors.primaryRed.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.lock_outline, color: AppColors.primaryRed, size: 22),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Desactivar Transmisión',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Ingresa tu PIN secreto de seguridad (4 dígitos) para detener la transmisión de ubicación.',
+                    style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+                  ),
+                  const SizedBox(height: 16),
+                  TextField(
+                    controller: pinController,
+                    keyboardType: TextInputType.number,
+                    maxLength: 4,
+                    obscureText: true,
+                    obscuringCharacter: '•',
+                    textAlign: TextAlign.center,
+                    style: GoogleFonts.inter(
+                      fontSize: 20,
+                      fontWeight: FontWeight.bold,
+                      letterSpacing: 8,
+                      color: Colors.white,
+                    ),
+                    decoration: InputDecoration(
+                      hintText: '••••',
+                      counterText: '',
+                      hintStyle: GoogleFonts.inter(letterSpacing: 4, color: AppColors.textMuted),
+                      prefixIcon: const Icon(Icons.pin, color: AppColors.accentOrange, size: 18),
+                      errorText: errorMessage,
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: Text(
+                    'CANCELAR',
+                    style: GoogleFonts.inter(
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final pin = pinController.text.trim();
+                    if (pin.isEmpty) {
+                      setDialogState(() {
+                        errorMessage = 'Ingresa tu PIN';
+                      });
+                      return;
+                    }
+                    final isValid = await SessionService.verifySecretPin(pin);
+                    if (!isValid) {
+                      setDialogState(() {
+                        errorMessage = 'PIN secreto incorrecto';
+                      });
+                      return;
+                    }
+                    await trackingService.stopTracking();
+                    if (dialogContext.mounted) {
+                      Navigator.of(dialogContext).pop();
+                    }
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(
+                            'Transmisión de ubicación en tiempo real finalizada.',
+                            style: GoogleFonts.inter(
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          backgroundColor: const Color(0xFF1E293B),
+                          behavior: SnackBarBehavior.floating,
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                      );
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primaryRed,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: Text(
+                    'DESACTIVAR',
+                    style: GoogleFonts.inter(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    } finally {
+      _isStopTrackingDialogOpen = false;
+    }
   }
 
   void _triggerCategoryEmergencyAlert(String categoryName) {
@@ -58,6 +264,7 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
     EmergencyCountdownDialog.show(
       context,
       alertType: categoryName,
+      source: 'BOTÓN CATEGORÍA ($categoryName)',
       isDirectWhatsAppApi: true,
     );
   }
@@ -84,14 +291,20 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                       Row(
                         children: [
                           Container(
-                            width: 6,
-                            height: 6,
+                            width: 8,
+                            height: 8,
                             decoration: const BoxDecoration(
                               color: AppColors.accentGreen,
                               shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: AppColors.accentGreen,
+                                  blurRadius: 6,
+                                ),
+                              ],
                             ),
                           ),
-                          const SizedBox(width: 6),
+                          const SizedBox(width: 8),
                           Text(
                             'SISTEMA EN LÍNEA',
                             style: GoogleFonts.chakraPetch(
@@ -105,7 +318,7 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                       ),
                       const SizedBox(height: 4),
                       Text(
-                        'Hola, Usuario',
+                        _citizenName.isNotEmpty ? 'Hola, $_citizenName' : 'Central de Seguridad',
                         style: GoogleFonts.inter(
                           fontSize: 20,
                           fontWeight: FontWeight.w800,
@@ -135,9 +348,9 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                       child: Container(
                         color: const Color(0xFF161F2E),
                         child: const Icon(
-                          Icons.person_outline_rounded,
+                          Icons.security_rounded,
                           color: Color(0xFFFF8A65),
-                          size: 26,
+                          size: 24,
                         ),
                       ),
                     ),
@@ -145,7 +358,129 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                 ],
               ),
 
-              const SizedBox(height: 28),
+              const SizedBox(height: 16),
+
+              // Live GPS Tracking Banner (Only active for ROBO)
+              AnimatedBuilder(
+                animation: LocationTrackingService(),
+                builder: (context, _) {
+                  final trackingService = LocationTrackingService();
+                  if (!trackingService.isTracking) {
+                    return const SizedBox.shrink();
+                  }
+
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 14),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          const Color(0xFF8B0000).withValues(alpha: 0.35),
+                          AppColors.surface,
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: const Color(0xFFFF1744),
+                        width: 1.5,
+                      ),
+                      boxShadow: [
+                        BoxShadow(
+                          color: const Color(0xFFFF1744).withValues(alpha: 0.25),
+                          blurRadius: 12,
+                        ),
+                      ],
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 10,
+                              height: 10,
+                              decoration: const BoxDecoration(
+                                color: Color(0xFFFF1744),
+                                shape: BoxShape.circle,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                'SEGUIMIENTO GPS EN VIVO (ROBO)',
+                                style: GoogleFonts.chakraPetch(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: const Color(0xFFFF5252),
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFFF1744).withValues(alpha: 0.2),
+                                borderRadius: BorderRadius.circular(4),
+                              ),
+                              child: Text(
+                                'TRANSMITIENDO',
+                                style: GoogleFonts.chakraPetch(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.bold,
+                                  color: const Color(0xFFFF5252),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            const Icon(
+                              Icons.wifi_tethering,
+                              size: 14,
+                              color: Color(0xFFFF8A80),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              child: Text(
+                                'Transmitiendo tu ubicación en tiempo real a la Central de Video Vigilancia ...',
+                                style: GoogleFonts.inter(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                  color: const Color(0xFFFF8A80),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 10),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            onPressed: () => _showStopTrackingDialog(context, trackingService),
+                            icon: const Icon(Icons.lock_outline, size: 15, color: Colors.white),
+                            label: Text(
+                              'DESACTIVAR TRANSMISIÓN (REQUIERE PIN)',
+                              style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.bold),
+                            ),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFFC62828),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 8),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+
+              const SizedBox(height: 24),
 
               // Central Pulsing Emergency Button
               Center(
@@ -155,15 +490,15 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                     animation: _pulseAnimation,
                     builder: (context, child) {
                       return SizedBox(
-                        width: 230,
-                        height: 230,
+                        width: 220,
+                        height: 220,
                         child: Stack(
                           alignment: Alignment.center,
                           children: [
                             // Outer ring 1
                             Container(
-                              width: 220 * _pulseAnimation.value,
-                              height: 220 * _pulseAnimation.value,
+                              width: 210 * _pulseAnimation.value,
+                              height: 210 * _pulseAnimation.value,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 border: Border.all(
@@ -176,8 +511,8 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                             ),
                             // Outer ring 2
                             Container(
-                              width: 185 * _pulseAnimation.value,
-                              height: 185 * _pulseAnimation.value,
+                              width: 175 * _pulseAnimation.value,
+                              height: 175 * _pulseAnimation.value,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 border: Border.all(
@@ -190,8 +525,8 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                             ),
                             // Inner Main Core Button
                             Container(
-                              width: 148,
-                              height: 148,
+                              width: 142,
+                              height: 142,
                               decoration: BoxDecoration(
                                 shape: BoxShape.circle,
                                 gradient: const RadialGradient(
@@ -254,7 +589,7 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                 ),
               ),
 
-              const SizedBox(height: 24),
+              const SizedBox(height: 22),
 
               // Categories Header Row
               Row(
@@ -281,7 +616,7 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                 ],
               ),
 
-              const SizedBox(height: 14),
+              const SizedBox(height: 12),
 
               // 2x3 Grid of Categories
               GridView.builder(
@@ -344,7 +679,85 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                 },
               ),
 
-              const SizedBox(height: 20),
+              const SizedBox(height: 14),
+
+              // Banner táctico para Reporte Libre / Personalizado
+              InkWell(
+                onTap: () {
+                  Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) => const NewReportView(initialCategory: 'PERSONALIZADO'),
+                    ),
+                  );
+                },
+                borderRadius: BorderRadius.circular(12),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                  decoration: BoxDecoration(
+                    color: AppColors.surface,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: const Color(0xFFFF9100).withValues(alpha: 0.35),
+                      width: 1.2,
+                    ),
+                    boxShadow: [
+                      BoxShadow(
+                        color: const Color(0xFFFF9100).withValues(alpha: 0.08),
+                        blurRadius: 10,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFFFF9100).withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        child: const Icon(
+                          Icons.edit_note_rounded,
+                          color: Color(0xFFFF9100),
+                          size: 22,
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              'REPORTE PERSONALIZADO',
+                              style: GoogleFonts.inter(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.8,
+                                color: Colors.white,
+                              ),
+                            ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Describe una incidencia específica y adjunta evidencias',
+                              style: GoogleFonts.inter(
+                                fontSize: 11,
+                                color: AppColors.textMuted,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      const Icon(
+                        Icons.arrow_forward_ios_rounded,
+                        color: Color(0xFFFF9100),
+                        size: 16,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+              const SizedBox(height: 24),
             ],
           ),
         ),

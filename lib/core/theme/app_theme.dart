@@ -23,9 +23,9 @@ class AppColors {
   
   // Text & Icons
   static const Color textPrimary = Color(0xFFF8FAFC);
-  static const Color textSecondary = Color(0xFF94A3B8);
-  static const Color textMuted = Color(0xFF64748B);
-  static const Color textDisabled = Color(0xFF475569);
+  static const Color textSecondary = Color(0xFFCBD5E1);
+  static const Color textMuted = Color(0xFF94A3B8);
+  static const Color textDisabled = Color(0xFF64748B);
   
   // States
   static const Color success = Color(0xFF10B981);
@@ -41,6 +41,29 @@ class AppTheme {
       useMaterial3: true,
       brightness: Brightness.dark,
       scaffoldBackgroundColor: AppColors.background,
+      snackBarTheme: SnackBarThemeData(
+        backgroundColor: AppColors.surfaceElevated,
+        contentTextStyle: GoogleFonts.inter(
+          color: Colors.white,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+        actionTextColor: AppColors.primaryRed,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        behavior: SnackBarBehavior.floating,
+      ),
+      dialogTheme: DialogThemeData(
+        backgroundColor: AppColors.surface,
+        titleTextStyle: GoogleFonts.inter(
+          fontSize: 18,
+          fontWeight: FontWeight.bold,
+          color: Colors.white,
+        ),
+        contentTextStyle: GoogleFonts.inter(
+          fontSize: 14,
+          color: AppColors.textPrimary,
+        ),
+      ),
       colorScheme: const ColorScheme.dark(
         primary: AppColors.primaryRed,
         onPrimary: Colors.white,

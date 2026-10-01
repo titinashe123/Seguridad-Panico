@@ -3,32 +3,47 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/services/whatsapp_api_service.dart';
+import '../../../data/services/location_tracking_service.dart';
+import '../../../data/services/session_service.dart';
+import '../../../data/services/gps_location_service.dart';
 import '../reports/new_report_view.dart';
 
 class EmergencyCountdownDialog extends StatefulWidget {
   final String alertType;
   final bool isDirectWhatsAppApi;
+  final String source;
 
   const EmergencyCountdownDialog({
     super.key,
     this.alertType = 'ROBO',
     this.isDirectWhatsAppApi = true,
+    this.source = 'BOTÓN PRINCIPAL',
   });
+
+  static bool _isOpen = false;
 
   static Future<void> show(
     BuildContext context, {
     String alertType = 'ROBO',
     bool isDirectWhatsAppApi = true,
-  }) {
-    return showDialog(
-      context: context,
-      barrierDismissible: false,
-      barrierColor: Colors.black.withValues(alpha: 0.85),
-      builder: (_) => EmergencyCountdownDialog(
-        alertType: alertType,
-        isDirectWhatsAppApi: isDirectWhatsAppApi,
-      ),
-    );
+    String source = 'BOTÓN PRINCIPAL',
+  }) async {
+    if (_isOpen) return;
+    _isOpen = true;
+    try {
+      await showDialog(
+        context: context,
+        barrierDismissible: false,
+        barrierColor: Colors.black.withValues(alpha: 0.85),
+        builder: (_) => EmergencyCountdownDialog(
+          alertType: alertType,
+          isDirectWhatsAppApi: isDirectWhatsAppApi,
+          source: source,
+        ),
+      );
+    } finally {
+      _isOpen = false;
+    }
   }
 
   @override
@@ -72,10 +87,34 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
     Navigator.of(parentContext).pop();
 
     if (widget.isDirectWhatsAppApi) {
+      // Capturar posición GPS real del dispositivo
+      final position = await GpsLocationService.getCurrentLocation();
+      final double lat = position?.latitude ?? -13.71450;
+      final double lon = position?.longitude ?? -76.20320;
+      final String address = position != null 
+          ? 'Ubicación móvil GPS (Pisco)'
+          : 'Pisco, Ica - Ubicación móvil';
+
       // Envío automático vía API sin abrir el formulario ni la app de WhatsApp
-      await WhatsAppApiService.sendAutomatedEmergencyAlert(
+      final alertId = await WhatsAppApiService.sendAutomatedEmergencyAlert(
         category: widget.alertType,
+        source: widget.source,
+        recipientNumber: WhatsAppApiService.defaultEmergencyRecipient,
+        lat: lat,
+        lon: lon,
+        address: address,
       );
+
+      final isRobo = widget.alertType.trim().toUpperCase() == 'ROBO';
+      final isSecuestro = widget.alertType.trim().toUpperCase() == 'SECUESTRO';
+      final hasLiveTracking = isRobo || isSecuestro;
+      if (hasLiveTracking && alertId != null) {
+        LocationTrackingService().startTracking(
+          alertId: alertId,
+          initialLat: lat,
+          initialLon: lon,
+        );
+      }
 
       if (parentContext.mounted) {
         showDialog(
@@ -101,7 +140,9 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
               ],
             ),
             content: Text(
-              'El reporte fue enviado con éxito a la Central de Video Vigilancia.',
+              hasLiveTracking
+                  ? 'El reporte fue enviado con éxito a la Central de Video Vigilancia.\n\n🔴 SEGUIMIENTO EN VIVO ACTIVADO:\nSe inició el rastreo GPS en tiempo real para seguir tu desplazamiento.'
+                  : 'El reporte fue enviado con éxito a la Central de Video Vigilancia.',
               style: GoogleFonts.inter(fontSize: 14, color: AppColors.textSecondary),
             ),
             actions: [
@@ -131,13 +172,64 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
     }
   }
 
-  void _onCancel() {
+  void _onCancel() async {
+    final enteredPin = _pinController.text.trim();
+    if (enteredPin.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Ingrese su PIN secreto de 4 dígitos para cancelar.',
+            style: GoogleFonts.inter(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
+          backgroundColor: AppColors.error,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      );
+      return;
+    }
+
+    final isValid = await SessionService.verifySecretPin(enteredPin);
+    if (!isValid) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'PIN secreto incorrecto. No se puede cancelar la alerta.',
+            style: GoogleFonts.inter(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
+          backgroundColor: AppColors.error,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      );
+      return;
+    }
+
     _timer?.cancel();
+    if (!mounted) return;
     Navigator.of(context).pop();
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Alerta cancelada por el usuario.'),
-        backgroundColor: AppColors.surfaceVariant,
+      SnackBar(
+        content: Text(
+          'Alerta cancelada por el usuario con PIN secreto.',
+          style: GoogleFonts.inter(
+            color: Colors.white,
+            fontWeight: FontWeight.w600,
+            fontSize: 14,
+          ),
+        ),
+        backgroundColor: const Color(0xFF1E293B),
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
   }
@@ -152,8 +244,29 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: SingleChildScrollView(
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              '⚠️ Debe ingresar su PIN secreto de 4 dígitos para cancelar la alerta.',
+              style: GoogleFonts.inter(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
+            ),
+            backgroundColor: AppColors.primaryRed,
+            duration: const Duration(seconds: 2),
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+        );
+      },
+      child: Center(
+        child: SingleChildScrollView(
         child: Dialog(
           backgroundColor: Colors.transparent,
           insetPadding: const EdgeInsets.symmetric(horizontal: 24),
@@ -380,6 +493,7 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
           ),
         ),
       ),
-    );
-  }
+    ),
+  );
+}
 }
