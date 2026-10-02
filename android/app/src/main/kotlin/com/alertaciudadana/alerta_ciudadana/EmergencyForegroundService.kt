@@ -429,12 +429,12 @@ class EmergencyForegroundService : Service() {
             }
         } catch (_: Exception) {}
 
-        // 5. Iniciar la notificación con cuenta regresiva rápida (3 segundos)
-        updateEmergencyNotificationCountdown(3, alertType, fullScreenPendingIntent)
+        // 5. Iniciar la notificación con cuenta regresiva (5 segundos)
+        updateEmergencyNotificationCountdown(5, alertType, fullScreenPendingIntent)
 
-        // 6. Iniciar temporizador nativo de 3 segundos
+        // 6. Iniciar temporizador nativo de 5 segundos
         activeCountdownTimer?.cancel()
-        activeCountdownTimer = object : CountDownTimer(3000, 1000) {
+        activeCountdownTimer = object : CountDownTimer(5000, 1000) {
             override fun onTick(millisUntilFinished: Long) {
                 val seconds = (millisUntilFinished / 1000) + 1
                 if (isEmergencyActive && !isEmergencyDispatched) {
