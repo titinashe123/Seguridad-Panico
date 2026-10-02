@@ -47,6 +47,11 @@ class EmergencyForegroundService : Service() {
     private var lastTheftTriggerTime: Long = 0
     private var lastButtonTriggerTime: Long = 0
 
+    private var consecutiveSnatchCount = 0
+    private var lastSnatchSampleTime: Long = 0
+    private var consecutiveGyroCount = 0
+    private var lastGyroSampleTime: Long = 0
+
     companion object {
         const val CHANNEL_ID = "alerta_ciudadana_protection_channel"
         const val EMERGENCY_ALARM_CHANNEL_ID = "alerta_ciudadana_emergency_alarm"
@@ -309,14 +314,28 @@ class EmergencyForegroundService : Service() {
                             // Magnitud total incluyendo gravedad (9.8 m/s²)
                             val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble()).toFloat()
 
-                            // Umbral calibrado de arrebato violento de celular (> 28.5 m/s², aprox 2.9G):
-                            // Evita falsos positivos por pulsar el botón con fuerza, caminar, trotar o sentarse
-                            if (magnitude > 28.5f) {
-                                lastTheftTriggerTime = now
-                                onTheftSnatchDetected(
-                                    "sensor_antirrobo_acelerometro",
-                                    "Arrebato brusco detectado (Aceleración: ${String.format(Locale.US, "%.1f", magnitude)} m/s²)"
-                                )
+                            // Umbral de arrebato violento de celular (> 38.0 m/s², aprox 3.9G):
+                            // Requiere tirón real de alta energía y confirmación en 2 lecturas consecutivas para descartar golpes o vibraciones
+                            if (magnitude > 38.0f) {
+                                if (now - lastSnatchSampleTime < 400) {
+                                    consecutiveSnatchCount++
+                                } else {
+                                    consecutiveSnatchCount = 1
+                                }
+                                lastSnatchSampleTime = now
+
+                                if (consecutiveSnatchCount >= 2 || magnitude > 48.0f) {
+                                    consecutiveSnatchCount = 0
+                                    lastTheftTriggerTime = now
+                                    onTheftSnatchDetected(
+                                        "sensor_antirrobo_acelerometro",
+                                        "Arrebato violento detectado (Aceleración: ${String.format(Locale.US, "%.1f", magnitude)} m/s²)"
+                                    )
+                                }
+                            } else {
+                                if (now - lastSnatchSampleTime > 400) {
+                                    consecutiveSnatchCount = 0
+                                }
                             }
                         }
                         Sensor.TYPE_GYROSCOPE -> {
@@ -326,14 +345,28 @@ class EmergencyForegroundService : Service() {
                             // Velocidad angular total
                             val rotMagnitude = Math.sqrt((rx * rx + ry * ry + rz * rz).toDouble()).toFloat()
 
-                            // Forcejeo violento al arrebatar el teléfono (> 8.5 rad/s, aprox 487°/s):
-                            // Evita falsos positivos por giros rápidos de muñeca o cambiar de mano
-                            if (rotMagnitude > 8.5f) {
-                                lastTheftTriggerTime = now
-                                onTheftSnatchDetected(
-                                    "sensor_antirrobo_giroscopio",
-                                    "Forcejeo violento detectado (Rotación: ${String.format(Locale.US, "%.1f", rotMagnitude)} rad/s)"
-                                )
+                            // Forcejeo violento al arrebatar el teléfono (> 14.0 rad/s, aprox 800°/s):
+                            // Requiere confirmación de giro violento continuo para evitar falsos positivos
+                            if (rotMagnitude > 14.0f) {
+                                if (now - lastGyroSampleTime < 400) {
+                                    consecutiveGyroCount++
+                                } else {
+                                    consecutiveGyroCount = 1
+                                }
+                                lastGyroSampleTime = now
+
+                                if (consecutiveGyroCount >= 2 || rotMagnitude > 20.0f) {
+                                    consecutiveGyroCount = 0
+                                    lastTheftTriggerTime = now
+                                    onTheftSnatchDetected(
+                                        "sensor_antirrobo_giroscopio",
+                                        "Forcejeo violento detectado (Rotación: ${String.format(Locale.US, "%.1f", rotMagnitude)} rad/s)"
+                                    )
+                                }
+                            } else {
+                                if (now - lastGyroSampleTime > 400) {
+                                    consecutiveGyroCount = 0
+                                }
                             }
                         }
                     }

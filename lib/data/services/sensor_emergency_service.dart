@@ -21,15 +21,19 @@ class SensorEmergencyService {
   bool get isListening => _isListening;
 
   /// Umbral de aceleración para detectar un arrebato violento de celular (m/s²)
-  /// Un tirón brusco real al arrebatar el teléfono genera aceleraciones superiores a 28.5 m/s² (~2.9G).
-  /// Esto previene falsos positivos al presionar botones físicos con fuerza, caminar o sentarse.
-  double snatchAccelerationThreshold = 28.5;
+  /// Un arrebato real en moto o a pie implica un jalón violento de alta energía (> 38.0 m/s², ~3.9G).
+  /// Esto previene falsos positivos al trotar, mover el brazo, colocarlo en la mesa o pulsar botones.
+  double snatchAccelerationThreshold = 38.0;
 
   /// Umbral de rotación brusca para el giroscopio ante forcejeo violento de robo (rad/s)
-  /// Más de 8.5 rad/s equivale a > 487°/seg de giro violento (evita falsos giros rápidos de muñeca).
-  double struggleGyroThreshold = 8.5;
+  /// Más de 14.0 rad/s equivale a > 800°/seg de giro violento continuo (fuerza extrema de forcejeo).
+  double struggleGyroThreshold = 14.0;
 
   DateTime? _lastTriggerTime;
+  int _consecutiveSnatchCount = 0;
+  DateTime? _lastSnatchSampleTime;
+  int _consecutiveGyroCount = 0;
+  DateTime? _lastGyroSampleTime;
 
   /// Inicia el monitoreo de los sensores del teléfono
   void startMonitoring({
@@ -73,24 +77,57 @@ class SensorEmergencyService {
   void _handleAccelerometer(double x, double y, double z) {
     // Calcular magnitud total del vector de aceleración: sqrt(x^2 + y^2 + z^2)
     final magnitude = math.sqrt(x * x + y * y + z * z);
+    final now = DateTime.now();
 
     if (magnitude > snatchAccelerationThreshold) {
-      _dispatchEmergencyIfReady(
-        reason: 'Arrebato violento de celular detectado (${magnitude.toStringAsFixed(1)} m/s²)',
-        source: 'sensor_antirrobo_acelerometro',
-      );
+      if (_lastSnatchSampleTime != null && now.difference(_lastSnatchSampleTime!).inMilliseconds < 400) {
+        _consecutiveSnatchCount++;
+      } else {
+        _consecutiveSnatchCount = 1;
+      }
+      _lastSnatchSampleTime = now;
+
+      // Requiere al menos 2 lecturas consecutivas de aceleración violenta dentro de 400ms
+      // (confirma arrastre/jalón continuo de arrebato y descarta impactos aislados de 1 solo milisegundo)
+      if (_consecutiveSnatchCount >= 2 || magnitude > 48.0) {
+        _consecutiveSnatchCount = 0;
+        _dispatchEmergencyIfReady(
+          reason: 'Arrebato violento de celular detectado (${magnitude.toStringAsFixed(1)} m/s²)',
+          source: 'sensor_antirrobo_acelerometro',
+        );
+      }
+    } else {
+      if (_lastSnatchSampleTime != null && now.difference(_lastSnatchSampleTime!).inMilliseconds > 400) {
+        _consecutiveSnatchCount = 0;
+      }
     }
   }
 
   void _handleGyroscope(double x, double y, double z) {
     // Magnitud de rotación angular
     final rotMagnitude = math.sqrt(x * x + y * y + z * z);
+    final now = DateTime.now();
 
     if (rotMagnitude > struggleGyroThreshold) {
-      _dispatchEmergencyIfReady(
-        reason: 'Forcejeo o giro violento detectado (${rotMagnitude.toStringAsFixed(1)} rad/s)',
-        source: 'sensor_antirrobo_giroscopio',
-      );
+      if (_lastGyroSampleTime != null && now.difference(_lastGyroSampleTime!).inMilliseconds < 400) {
+        _consecutiveGyroCount++;
+      } else {
+        _consecutiveGyroCount = 1;
+      }
+      _lastGyroSampleTime = now;
+
+      // Requiere al menos 2 lecturas consecutivas de giro violento continuo (> 14.0 rad/s)
+      if (_consecutiveGyroCount >= 2 || rotMagnitude > 20.0) {
+        _consecutiveGyroCount = 0;
+        _dispatchEmergencyIfReady(
+          reason: 'Forcejeo violento detectado (${rotMagnitude.toStringAsFixed(1)} rad/s)',
+          source: 'sensor_antirrobo_giroscopio',
+        );
+      }
+    } else {
+      if (_lastGyroSampleTime != null && now.difference(_lastGyroSampleTime!).inMilliseconds > 400) {
+        _consecutiveGyroCount = 0;
+      }
     }
   }
 
