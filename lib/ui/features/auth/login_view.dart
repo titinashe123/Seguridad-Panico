@@ -14,8 +14,8 @@ class LoginView extends StatefulWidget {
 }
 
 class _LoginViewState extends State<LoginView> {
-  final _dniController = TextEditingController(text: '12345678');
-  final _passwordController = TextEditingController(text: '12345678');
+  final _dniController = TextEditingController();
+  final _passwordController = TextEditingController();
   bool _obscurePassword = true;
   bool _isLoading = false;
 
@@ -28,11 +28,45 @@ class _LoginViewState extends State<LoginView> {
 
   void _onLogin() async {
     if (_isLoading) return;
+
+    final dni = _dniController.text.trim();
+    final password = _passwordController.text.trim();
+
+    if (dni.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Por favor ingresa tu número de DNI',
+            style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: Colors.white),
+          ),
+          backgroundColor: AppColors.error,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      );
+      return;
+    }
+
+    if (password.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Por favor ingresa tu contraseña',
+            style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: Colors.white),
+          ),
+          backgroundColor: AppColors.error,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      );
+      return;
+    }
+
     setState(() => _isLoading = true);
 
     final result = await AuthService.login(
-      dni: _dniController.text,
-      password: _passwordController.text,
+      dni: dni,
+      password: password,
     );
 
     if (!mounted) return;
@@ -139,6 +173,11 @@ class _LoginViewState extends State<LoginView> {
                     ),
                     decoration: const InputDecoration(
                       hintText: 'Ingresa tu DNI',
+                      prefixIcon: Icon(
+                        Icons.badge_outlined,
+                        color: AppColors.textMuted,
+                        size: 20,
+                      ),
                     ),
                   ),
 
