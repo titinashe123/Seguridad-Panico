@@ -56,14 +56,16 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
       },
     );
 
-    // 2. Iniciar escucha del botón físico de encendido (3 pulsaciones consecutivas) y servicio persistente
+    // 2. Iniciar escucha del botón físico de encendido (3 pulsaciones consecutivas), sensores de fondo y servicio persistente
     _hardwareService.initialize(
-      onTriggered: (source) {
+      onTriggered: (source, [alertType]) {
         if (!mounted) return;
+        final type = alertType ?? 'ROBO';
+        final label = type == 'ACCIDENTE' ? 'IMPACTO / ACCIDENTE (FONDO)' : 'BOTÓN DE ENCENDIDO (3X)';
         EmergencyCountdownDialog.show(
           context,
-          alertType: 'ROBO',
-          source: 'BOTÓN DE ENCENDIDO (3X)',
+          alertType: type,
+          source: label,
           isDirectWhatsAppApi: true,
         );
       },

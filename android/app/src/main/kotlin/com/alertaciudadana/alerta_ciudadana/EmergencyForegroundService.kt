@@ -10,6 +10,10 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -23,6 +27,11 @@ class EmergencyForegroundService : Service() {
     private val powerPressTimestamps = mutableListOf<Long>()
     private var screenReceiver: BroadcastReceiver? = null
     private var isLiveTrackingActive: Boolean = false
+
+    private var sensorManager: SensorManager? = null
+    private var accelerometer: Sensor? = null
+    private var sensorEventListener: SensorEventListener? = null
+    private var lastAccidentTriggerTime: Long = 0
 
     companion object {
         const val CHANNEL_ID = "alerta_ciudadana_protection_channel"
@@ -73,6 +82,7 @@ class EmergencyForegroundService : Service() {
         isServiceRunning = true
         createNotificationChannels()
         registerScreenReceiver()
+        registerSensorListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -86,6 +96,9 @@ class EmergencyForegroundService : Service() {
                 isLiveTrackingActive = intent.getBooleanExtra(EXTRA_IS_TRACKING, false)
             }
         }
+
+        registerScreenReceiver()
+        registerSensorListener()
 
         val notification = buildCurrentNotification()
         startForeground(NOTIFICATION_ID, notification)
@@ -199,10 +212,55 @@ class EmergencyForegroundService : Service() {
         registerReceiver(screenReceiver, filter)
     }
 
+    private fun registerSensorListener() {
+        if (sensorManager != null) return
+        try {
+            sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
+            accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            if (accelerometer != null) {
+                sensorEventListener = object : SensorEventListener {
+                    override fun onSensorChanged(event: SensorEvent?) {
+                        if (event == null) return
+                        val x = event.values[0]
+                        val y = event.values[1]
+                        val z = event.values[2]
+                        // Magnitud de aceleración total (incluyendo gravedad 9.8 m/s²)
+                        val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble()).toFloat()
+                        // Umbral de impacto severo o caída brusca (28.0 m/s², aprox 2.85G)
+                        if (magnitude > 28.0f) {
+                            val now = System.currentTimeMillis()
+                            if (now - lastAccidentTriggerTime > 10000) { // Debounce de 10s
+                                lastAccidentTriggerTime = now
+                                onAccidentDetected(magnitude)
+                            }
+                        }
+                    }
+
+                    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+                }
+                sensorManager?.registerListener(
+                    sensorEventListener,
+                    accelerometer,
+                    SensorManager.SENSOR_DELAY_UI
+                )
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun unregisterSensorListener() {
+        try {
+            sensorEventListener?.let {
+                sensorManager?.unregisterListener(it)
+            }
+        } catch (_: Exception) {}
+        sensorEventListener = null
+        sensorManager = null
+    }
+
     private fun onTriplePowerPressDetected() {
         // 1. Despacho INMEDIATO a la app viva (latencia 0ms)
         try {
-            MainActivity.instance?.triggerPanicFromNative("power_button_3x")
+            MainActivity.instance?.triggerPanicFromNative("power_button_3x", "ROBO")
         } catch (_: Exception) {}
 
         // 2. Despertar pantalla con WakeLock inmediatamente
@@ -223,6 +281,7 @@ class EmergencyForegroundService : Service() {
                     Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(MainActivity.EXTRA_TRIGGER_EMERGENCY, true)
             putExtra("source", "power_button_3x")
+            putExtra("alert_type", "ROBO")
         }
         val fullScreenPendingIntent = PendingIntent.getActivity(
             this,
@@ -271,16 +330,98 @@ class EmergencyForegroundService : Service() {
         notificationManager?.notify(PANIC_NOTIFICATION_ID, alarmNotification)
     }
 
+    private fun onAccidentDetected(magnitude: Float) {
+        // 1. Despacho INMEDIATO a la app viva
+        try {
+            MainActivity.instance?.triggerPanicFromNative("sensor_impacto", "ACCIDENTE")
+        } catch (_: Exception) {}
+
+        // 2. Despertar pantalla con WakeLock inmediatamente
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            val wakeLock = powerManager?.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "AlertaCiudadana:AccidentWakeLock"
+            )
+            wakeLock?.acquire(10000L)
+        } catch (_: Exception) {}
+
+        // 3. Crear Intent directo y lanzar actividad al frente
+        val fullScreenIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                    Intent.FLAG_ACTIVITY_SINGLE_TOP
+            putExtra(MainActivity.EXTRA_TRIGGER_EMERGENCY, true)
+            putExtra("source", "sensor_impacto")
+            putExtra("alert_type", "ACCIDENTE")
+        }
+        val fullScreenPendingIntent = PendingIntent.getActivity(
+            this,
+            998,
+            fullScreenIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        try {
+            startActivity(fullScreenIntent)
+        } catch (_: Exception) {}
+
+        // 4. Vibración de advertencia
+        try {
+            val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1))
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator?.vibrate(longArrayOf(0, 500, 200, 500), -1)
+            }
+        } catch (_: Exception) {}
+
+        // 5. Notificación emergente (Full-Screen Intent / Heads-Up)
+        val smallIcon = applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_lock_idle_alarm
+        val alarmNotification = NotificationCompat.Builder(this, EMERGENCY_ALARM_CHANNEL_ID)
+            .setSmallIcon(smallIcon)
+            .setContentTitle("🚗 ¡POSIBLE ACCIDENTE / IMPACTO DETECTADO!")
+            .setContentText("Cuenta regresiva iniciada. Toca para cancelar si estás bien.")
+            .setStyle(NotificationCompat.BigTextStyle().bigText("Se detectó un impacto fuerte (${String.format("%.1f", magnitude)} m/s²).\nSi estás bien, toca aquí para cancelar con tu PIN antes de que se alerte a las autoridades y familiares."))
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setCategory(NotificationCompat.CATEGORY_ALARM)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setFullScreenIntent(fullScreenPendingIntent, true)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setContentIntent(fullScreenPendingIntent)
+            .addAction(
+                android.R.drawable.ic_menu_close_clear_cancel,
+                "❌ ESTOY BIEN (CANCELAR)",
+                fullScreenPendingIntent
+            )
+            .build()
+
+        val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+        notificationManager?.notify(PANIC_NOTIFICATION_ID, alarmNotification)
+    }
+
     override fun onTaskRemoved(rootIntent: Intent?) {
         val restartServiceIntent = Intent(applicationContext, EmergencyForegroundService::class.java).apply {
             setPackage(packageName)
         }
-        val restartPendingIntent = PendingIntent.getService(
-            applicationContext,
-            101,
-            restartServiceIntent,
-            PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
-        )
+        val restartPendingIntent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            PendingIntent.getForegroundService(
+                applicationContext,
+                101,
+                restartServiceIntent,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            )
+        } else {
+            PendingIntent.getService(
+                applicationContext,
+                101,
+                restartServiceIntent,
+                PendingIntent.FLAG_ONE_SHOT or PendingIntent.FLAG_IMMUTABLE
+            )
+        }
         val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
         alarmManager?.set(
             AlarmManager.ELAPSED_REALTIME,
@@ -298,6 +439,7 @@ class EmergencyForegroundService : Service() {
             } catch (_: Exception) {}
         }
         screenReceiver = null
+        unregisterSensorListener()
         super.onDestroy()
     }
 

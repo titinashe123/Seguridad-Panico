@@ -1,13 +1,14 @@
 import 'dart:developer' as developer;
 import 'package:flutter/services.dart';
 
-typedef HardwareTriggerCallback = void Function(String source);
+typedef HardwareTriggerCallback = void Function(String source, [String? alertType]);
 typedef StopTrackingDialogCallback = void Function();
 
 /// Servicio que interactúa con la capa nativa de Android para:
-/// 1. Recibir activación de emergencia por 3 pulsaciones del botón de encendido.
+/// 1. Recibir activación de emergencia por 3 pulsaciones del botón de encendido o impacto físico en segundo plano.
 /// 2. Controlar el servicio en primer plano persistente en segundo plano (Foreground Service).
 /// 3. Gestionar la notificación interactiva de rastreo en vivo y apertura de diálogo de PIN.
+/// 4. Recuperar activaciones de emergencia ocurridas mientras la app estaba completamente cerrada (arranque en frío).
 class HardwareTriggerService {
   static final HardwareTriggerService _instance = HardwareTriggerService._internal();
   factory HardwareTriggerService() => _instance;
@@ -28,7 +29,11 @@ class HardwareTriggerService {
       _onOpenStopTrackingDialog = onOpenStopTrackingDialog;
     }
 
-    if (_initialized) return;
+    if (_initialized) {
+      // Si ya estaba inicializado pero se volvió a vincular la UI, revisar si hay disparos pendientes
+      checkPendingTriggers();
+      return;
+    }
     _initialized = true;
 
     _channel.setMethodCallHandler((call) async {
@@ -36,8 +41,9 @@ class HardwareTriggerService {
         case 'onPanicTriggered':
           final Map? args = call.arguments as Map?;
           final String source = args?['source'] as String? ?? 'power_button_3x';
-          developer.log('🚨 DISPARO NATIVO BOTÓN DE ENCENDIDO (3x): $source', name: 'HardwareTriggerService');
-          _onHardwareTriggered?.call(source);
+          final String? alertType = args?['alertType'] as String?;
+          developer.log('🚨 DISPARO NATIVO DE EMERGENCIA: $source ($alertType)', name: 'HardwareTriggerService');
+          _onHardwareTriggered?.call(source, alertType);
           break;
 
         case 'onOpenStopTrackingDialog':
@@ -50,6 +56,36 @@ class HardwareTriggerService {
     // Iniciar automáticamente el servicio persistente en Android
     startBackgroundService();
     developer.log('Canal de disparador por hardware y segundo plano inicializado', name: 'HardwareTriggerService');
+
+    // Verificar si la app fue abierta debido a una emergencia pendiente (arranque desde app cerrada)
+    checkPendingTriggers();
+  }
+
+  /// Verifica si la actividad nativa fue despertada por una emergencia pendiente mientras Flutter cargaba
+  Future<void> checkPendingTriggers() async {
+    try {
+      final Map? pending = await _channel.invokeMapMethod('checkPendingTrigger');
+      if (pending != null && pending['hasPending'] == true) {
+        final String source = pending['source'] as String? ?? 'power_button_3x';
+        final String? alertType = pending['alertType'] as String?;
+        developer.log('🚨 DISPARO PENDIENTE AL ABRIR LA APP: $source ($alertType)', name: 'HardwareTriggerService');
+        // Pequeño delay para asegurar que el widget esté montado en el árbol
+        Future.delayed(const Duration(milliseconds: 350), () {
+          _onHardwareTriggered?.call(source, alertType);
+        });
+      }
+    } catch (e) {
+      developer.log('Error al verificar disparo pendiente: $e', name: 'HardwareTriggerService');
+    }
+
+    try {
+      final bool? pendingStop = await _channel.invokeMethod<bool>('checkPendingStopTracking');
+      if (pendingStop == true) {
+        Future.delayed(const Duration(milliseconds: 350), () {
+          _onOpenStopTrackingDialog?.call();
+        });
+      }
+    } catch (_) {}
   }
 
   void setStopTrackingDialogCallback(StopTrackingDialogCallback callback) {

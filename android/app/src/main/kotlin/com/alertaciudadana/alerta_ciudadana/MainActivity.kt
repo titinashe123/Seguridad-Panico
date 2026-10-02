@@ -17,6 +17,7 @@ class MainActivity : FlutterActivity() {
     private var pendingTriggerEmergency: Boolean = false
     private var pendingStopTrackingPin: Boolean = false
     private var pendingSource: String = "power_button_3x"
+    private var pendingAlertType: String = "ROBO"
 
     companion object {
         const val EXTRA_TRIGGER_EMERGENCY = "EXTRA_TRIGGER_EMERGENCY"
@@ -67,21 +68,17 @@ class MainActivity : FlutterActivity() {
 
         if (intent.getBooleanExtra(EXTRA_TRIGGER_EMERGENCY, false)) {
             val src = intent.getStringExtra("source") ?: "power_button_3x"
-            if (methodChannel != null) {
-                triggerPanicFromNative(src)
-            } else {
-                pendingTriggerEmergency = true
-                pendingSource = src
-            }
+            val alertType = intent.getStringExtra("alert_type") ?: "ROBO"
+            pendingTriggerEmergency = true
+            pendingSource = src
+            pendingAlertType = alertType
+            triggerPanicFromNative(src, alertType)
         }
 
         if (intent.getBooleanExtra(EXTRA_STOP_TRACKING_PIN, false)) {
-            if (methodChannel != null) {
-                runOnUiThread {
-                    methodChannel?.invokeMethod("onOpenStopTrackingDialog", null)
-                }
-            } else {
-                pendingStopTrackingPin = true
+            pendingStopTrackingPin = true
+            runOnUiThread {
+                methodChannel?.invokeMethod("onOpenStopTrackingDialog", null)
             }
         }
     }
@@ -106,8 +103,29 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "simulatePowerPress3x" -> {
-                    triggerPanicFromNative("simulated_power_press_3x")
+                    triggerPanicFromNative("simulated_power_press_3x", "ROBO")
                     result.success(true)
+                }
+                "checkPendingTrigger" -> {
+                    if (pendingTriggerEmergency) {
+                        val response = mapOf(
+                            "hasPending" to true,
+                            "source" to pendingSource,
+                            "alertType" to pendingAlertType
+                        )
+                        pendingTriggerEmergency = false
+                        result.success(response)
+                    } else {
+                        result.success(mapOf("hasPending" to false))
+                    }
+                }
+                "checkPendingStopTracking" -> {
+                    if (pendingStopTrackingPin) {
+                        pendingStopTrackingPin = false
+                        result.success(true)
+                    } else {
+                        result.success(false)
+                    }
                 }
                 "isNativeActive" -> {
                     result.success(true)
@@ -118,12 +136,10 @@ class MainActivity : FlutterActivity() {
 
         // Si había llamadas pendientes antes de que Flutter terminara de inicializar
         if (pendingTriggerEmergency) {
-            pendingTriggerEmergency = false
-            triggerPanicFromNative(pendingSource)
+            triggerPanicFromNative(pendingSource, pendingAlertType)
         }
 
         if (pendingStopTrackingPin) {
-            pendingStopTrackingPin = false
             runOnUiThread {
                 methodChannel?.invokeMethod("onOpenStopTrackingDialog", null)
             }
@@ -132,7 +148,10 @@ class MainActivity : FlutterActivity() {
 
     private var lastPanicTriggerTime: Long = 0
 
-    fun triggerPanicFromNative(source: String): Boolean {
+    fun triggerPanicFromNative(source: String, alertType: String = "ROBO"): Boolean {
+        pendingTriggerEmergency = true
+        pendingSource = source
+        pendingAlertType = alertType
         if (methodChannel == null) return false
         val now = System.currentTimeMillis()
         if (now - lastPanicTriggerTime < 1200) {
@@ -141,7 +160,7 @@ class MainActivity : FlutterActivity() {
         }
         lastPanicTriggerTime = now
         runOnUiThread {
-            methodChannel?.invokeMethod("onPanicTriggered", mapOf("source" to source))
+            methodChannel?.invokeMethod("onPanicTriggered", mapOf("source" to source, "alertType" to alertType))
         }
         return true
     }
