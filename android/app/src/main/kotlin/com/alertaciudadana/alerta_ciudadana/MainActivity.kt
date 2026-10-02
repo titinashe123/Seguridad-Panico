@@ -109,6 +109,7 @@ class MainActivity : FlutterActivity() {
                 "checkPendingTrigger" -> {
                     val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
                     val isDispatched = prefs.getBoolean("flutter.pending_emergency_dispatched", false) || EmergencyForegroundService.isEmergencyDispatched
+                    val nativeSuccess = prefs.getBoolean("flutter.native_dispatched_success", false)
                     val isActive = prefs.getBoolean("flutter.pending_emergency_active", false) || EmergencyForegroundService.isEmergencyActive
                     val source = prefs.getString("flutter.pending_emergency_source", pendingSource) ?: pendingSource
                     val alertType = prefs.getString("flutter.pending_emergency_alert_type", pendingAlertType) ?: pendingAlertType
@@ -117,6 +118,7 @@ class MainActivity : FlutterActivity() {
                         prefs.edit()
                             .putBoolean("flutter.pending_emergency_dispatched", false)
                             .putBoolean("flutter.pending_emergency_active", false)
+                            .putBoolean("flutter.native_dispatched_success", false)
                             .apply()
                         EmergencyForegroundService.isEmergencyDispatched = false
                         EmergencyForegroundService.isEmergencyActive = false
@@ -125,6 +127,7 @@ class MainActivity : FlutterActivity() {
                         result.success(mapOf(
                             "hasPending" to true,
                             "isDispatched" to true,
+                            "nativeSuccess" to nativeSuccess,
                             "source" to source,
                             "alertType" to alertType
                         ))

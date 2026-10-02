@@ -382,7 +382,6 @@ class EmergencyForegroundService : Service() {
 
             override fun onFinish() {
                 if (isEmergencyActive && !isEmergencyDispatched) {
-                    isEmergencyDispatched = true
                     dispatchEmergencyAlertFromService(source, alertType)
                 }
             }
@@ -423,6 +422,8 @@ class EmergencyForegroundService : Service() {
 
     private fun dispatchEmergencyAlertFromService(source: String, alertType: String) {
         Thread {
+            var nativeSuccess = false
+            var createdReportId: Long? = null
             try {
                 // 1. Obtener última ubicación GPS
                 val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
@@ -440,10 +441,19 @@ class EmergencyForegroundService : Service() {
                 val lat = bestLocation?.latitude ?: -13.71450
                 val lon = bestLocation?.longitude ?: -76.20320
 
-                // 2. Leer datos del ciudadano desde SharedPreferences
+                // 2. Leer datos del ciudadano desde SharedPreferences de forma completamente segura (sin ClassCastException)
                 val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-                val citizenDni = prefs.getString("flutter.app_session_user_dni", "74629337") ?: "74629337"
-                val idPersona = prefs.getInt("flutter.app_session_user_id_persona", 3)
+                val citizenDni = prefs.getString("flutter.app_session_user_dni", null) ?: "74629337"
+                val idPersona: Int = try {
+                    val raw = prefs.all["flutter.app_session_user_id_persona"]
+                    when (raw) {
+                        is Number -> raw.toInt()
+                        is String -> raw.toIntOrNull() ?: 3
+                        else -> 3
+                    }
+                } catch (_: Exception) {
+                    3
+                }
 
                 val headline = if (alertType == "ACCIDENTE") {
                     "🚗💥 ¡ACCIDENTE DE TRÁNSITO! AMBULANCIA Y POLICÍA REQUERIDA 🚗💥"
@@ -453,80 +463,158 @@ class EmergencyForegroundService : Service() {
                 val triggerLabel = if (source == "power_button_3x") {
                     "BOTÓN DE ENCENDIDO (3X) [MODO BOLSILLO / APP CERRADA]"
                 } else {
-                    "SENSOR DE IMPACTO / ACCIDENTE [APP CERRADA]"
+                    "IMPACTO / ACCIDENTE (FONDO)"
                 }
-                val gmapsUrl = "https://maps.google.com/?q=${String.format(Locale.US, "%.5f,%.5f", lat, lon)}"
-                val gmapsNav = "https://www.google.com/maps/dir/?api=1&destination=${String.format(Locale.US, "%.5f,%.5f", lat, lon)}"
+                val latStr = String.format(Locale.US, "%.5f", lat)
+                val lonStr = String.format(Locale.US, "%.5f", lon)
+                val gmapsUrl = "https://maps.google.com/?q=$latStr,$lonStr"
+                val gmapsNav = "🚗 Cómo llegar (Google Maps): https://www.google.com/maps/dir/?api=1&destination=$latStr,$lonStr"
 
                 val message = "$headline\n" +
                         "📍 Ubicación: Ubicación móvil GPS (Pisco)\n" +
-                        "🛰️ Coordenadas: Lat ${String.format(Locale.US, "%.5f", lat)}, Lon ${String.format(Locale.US, "%.5f", lon)}\n" +
+                        "🛰️ Coordenadas: Lat $latStr, Lon $lonStr\n" +
                         "🗺️ Mapa: $gmapsUrl\n" +
-                        "🚗 Cómo llegar: $gmapsNav\n" +
+                        "$gmapsNav\n" +
                         "⚡ Disparador: $triggerLabel\n" +
                         "🛡️ Despacho automático WhatsApp API a la Central de Video Vigilancia."
 
-                // 3. Despachar mensaje a WhatsApp vía Green-API
+                // 3. Despachar mensaje a WhatsApp vía Green-API (con timeouts explícitos y UTF-8)
                 try {
                     val waUrl = URL("https://7105.api.greenapi.com/waInstance710522731795/sendMessage/1d98a458d1a64672abcff255236d807432183678856b42cfba")
                     val conn = waUrl.openConnection() as HttpURLConnection
                     conn.requestMethod = "POST"
-                    conn.setRequestProperty("Content-Type", "application/json")
+                    conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    conn.connectTimeout = 10000
+                    conn.readTimeout = 10000
                     conn.doOutput = true
                     val jsonBody = JSONObject().apply {
                         put("chatId", "51976264949@c.us")
                         put("message", message)
                     }
-                    val os = conn.outputStream
-                    os.write(jsonBody.toString().toByteArray(Charsets.UTF_8))
-                    os.flush()
-                    os.close()
+                    val bytes = jsonBody.toString().toByteArray(Charsets.UTF_8)
+                    conn.setFixedLengthStreamingMode(bytes.size)
+                    conn.outputStream.use { os ->
+                        os.write(bytes)
+                        os.flush()
+                    }
                     val code = conn.responseCode
+                    val resText = if (code in 200..299) {
+                        conn.inputStream.bufferedReader().use { it.readText() }
+                    } else {
+                        conn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    }
+                    android.util.Log.d("EmergencyForegroundService", "Green API Response ($code): $resText")
+                    if (code in 200..299) {
+                        nativeSuccess = true
+                    }
                     conn.disconnect()
-                } catch (_: Exception) {}
+                } catch (waErr: Exception) {
+                    android.util.Log.e("EmergencyForegroundService", "Green API error: ${waErr.message}", waErr)
+                }
 
                 // 4. Registrar reporte en Supabase
-                try {
-                    val df = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
-                        timeZone = TimeZone.getTimeZone("UTC")
-                    }
-                    val nowUtcIso = df.format(Date())
+                val df = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }
+                val nowUtcIso = df.format(Date())
 
+                try {
                     val supabaseUrl = URL("https://emtzprcntefzkvvzmhfk.supabase.co/rest/v1/reporte")
                     val sConn = supabaseUrl.openConnection() as HttpURLConnection
                     sConn.requestMethod = "POST"
-                    sConn.setRequestProperty("Content-Type", "application/json")
+                    sConn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
                     sConn.setRequestProperty("apikey", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
                     sConn.setRequestProperty("Authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
                     sConn.setRequestProperty("Prefer", "return=representation")
+                    sConn.connectTimeout = 10000
+                    sConn.readTimeout = 10000
                     sConn.doOutput = true
 
                     val sBody = JSONObject().apply {
                         put("id_persona", idPersona)
-                        put("id_tipo", if (alertType == "ACCIDENTE") 4 else 1)
+                        put("id_tipo", if (alertType == "ACCIDENTE") 2 else 1)
                         put("id_estado", 1)
                         put("fecha_hora", nowUtcIso)
                         put("descripcion", message)
                         put("direccion_texto", "Ubicación móvil GPS (Pisco)")
                     }
-                    val sOs = sConn.outputStream
-                    sOs.write(sBody.toString().toByteArray(Charsets.UTF_8))
-                    sOs.flush()
-                    sOs.close()
+                    val sBytes = sBody.toString().toByteArray(Charsets.UTF_8)
+                    sConn.setFixedLengthStreamingMode(sBytes.size)
+                    sConn.outputStream.use { os ->
+                        os.write(sBytes)
+                        os.flush()
+                    }
                     val sCode = sConn.responseCode
+                    val sResText = if (sCode in 200..299) {
+                        sConn.inputStream.bufferedReader().use { it.readText() }
+                    } else {
+                        sConn.errorStream?.bufferedReader()?.use { it.readText() } ?: ""
+                    }
+                    android.util.Log.d("EmergencyForegroundService", "Supabase Response ($sCode): $sResText")
+                    if (sCode in 200..299) {
+                        nativeSuccess = true
+                        try {
+                            val jsonArr = org.json.JSONArray(sResText)
+                            if (jsonArr.length() > 0) {
+                                createdReportId = jsonArr.getJSONObject(0).optLong("id_reporte")
+                            }
+                        } catch (_: Exception) {}
+                    }
                     sConn.disconnect()
+                } catch (sErr: Exception) {
+                    android.util.Log.e("EmergencyForegroundService", "Supabase error: ${sErr.message}", sErr)
+                }
+
+                // 5. Guardar inmediatamente en la caché local de reportes de Flutter (local_saved_reports_v2)
+                try {
+                    val rawJson = prefs.getString("flutter.local_saved_reports_v2", null)
+                    val localArray = if (rawJson != null && rawJson.isNotEmpty()) {
+                        try { org.json.JSONArray(rawJson) } catch (_: Exception) { org.json.JSONArray() }
+                    } else {
+                        org.json.JSONArray()
+                    }
+
+                    val reportRecord = JSONObject().apply {
+                        put("id_reporte", createdReportId ?: System.currentTimeMillis())
+                        put("id_tipo", if (alertType == "ACCIDENTE") 2 else 1)
+                        put("tipo_incidencia", JSONObject().apply {
+                            put("nombre", alertType)
+                        })
+                        put("id_estado", 1)
+                        put("estado_reporte", JSONObject().apply {
+                            put("nombre", "Enviado")
+                        })
+                        put("fecha_hora", nowUtcIso)
+                        put("descripcion", message)
+                        put("direccion_texto", "Ubicación móvil GPS (Pisco)")
+                        put("fotos", org.json.JSONArray())
+                        put("latitud", lat)
+                        put("longitud", lon)
+                        put("is_synced", true)
+                    }
+
+                    val newLocalArray = org.json.JSONArray()
+                    newLocalArray.put(reportRecord)
+                    for (i in 0 until localArray.length()) {
+                        newLocalArray.put(localArray.get(i))
+                    }
+                    prefs.edit()
+                        .putString("flutter.local_saved_reports_v2", newLocalArray.toString())
+                        .apply()
                 } catch (_: Exception) {}
 
-                // 5. Guardar estado de despacho en SharedPreferences para que Flutter lo detecte al abrir
+                // 6. Actualizar flags de despacho y éxito
+                isEmergencyDispatched = true
                 prefs.edit()
                     .putBoolean("flutter.pending_emergency_dispatched", true)
                     .putBoolean("flutter.pending_emergency_active", false)
+                    .putBoolean("flutter.native_dispatched_success", nativeSuccess)
                     .putString("flutter.last_dispatched_alert_type", alertType)
                     .putString("flutter.last_dispatched_source", source)
                     .putLong("flutter.last_dispatched_time", System.currentTimeMillis())
                     .apply()
 
-                // 6. Activar rastreo en vivo si es ROBO
+                // 7. Activar rastreo en vivo si es ROBO
                 if (alertType == "ROBO") {
                     isLiveTrackingActive = true
                     val notif = buildCurrentNotification()
@@ -534,7 +622,7 @@ class EmergencyForegroundService : Service() {
                     manager?.notify(NOTIFICATION_ID, notif)
                 }
 
-                // 7. Vibración de confirmación
+                // 8. Vibración de confirmación
                 val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     vibrator?.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
@@ -543,14 +631,16 @@ class EmergencyForegroundService : Service() {
                     vibrator?.vibrate(500)
                 }
 
-                // 8. Actualizar notificación permanente de alarma a despachado
+                // 9. Actualizar notificación permanente de alarma a despachado
                 showDispatchedNotification(alertType)
 
-                // 9. Si MainActivity está abierta o se abre, informarle
+                // 10. Si MainActivity está abierta o se abre, informarle
                 MainActivity.instance?.runOnUiThread {
                     MainActivity.instance?.onEmergencyDispatchedFromNative(alertType, source)
                 }
-            } catch (_: Exception) {}
+            } catch (fatal: Exception) {
+                android.util.Log.e("EmergencyForegroundService", "Fatal error in dispatch: ${fatal.message}", fatal)
+            }
         }.start()
     }
 

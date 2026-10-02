@@ -1,3 +1,4 @@
+import 'dart:developer' as developer;
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
@@ -6,6 +7,9 @@ import '../../../data/services/sensor_emergency_service.dart';
 import '../../../data/services/hardware_trigger_service.dart';
 import '../../../data/services/location_tracking_service.dart';
 import '../../../data/services/session_service.dart';
+import '../../../data/services/gps_location_service.dart';
+import '../../../data/services/whatsapp_api_service.dart';
+import '../../../data/services/report_storage_service.dart';
 import '../emergency/emergency_countdown_dialog.dart';
 import '../reports/new_report_view.dart';
 
@@ -69,9 +73,41 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
           isDirectWhatsAppApi: true,
         );
       },
-      onEmergencyDispatched: (source, alertType) {
+      onEmergencyDispatched: (alertType, source, [nativeSuccess = false]) async {
         if (!mounted) return;
-        _showAlreadyDispatchedDialog(context, alertType, source);
+
+        String? dispatchedAlertId;
+        // Si la conexión en segundo plano estuvo restringida por ahorro de energía (Android Doze Mode),
+        // Flutter garantiza el despacho inmediato al despertar la app
+        if (nativeSuccess != true) {
+          developer.log('⚡ Red en segundo plano restringida: despachando alerta inmediatamente vía Flutter...', name: 'HomeView');
+          final position = await GpsLocationService.getCurrentLocation();
+          dispatchedAlertId = await WhatsAppApiService.sendAutomatedEmergencyAlert(
+            category: alertType,
+            source: source == 'power_button_3x' ? 'BOTÓN DE ENCENDIDO (3X)' : 'IMPACTO / ACCIDENTE (FONDO)',
+            lat: position?.latitude ?? -13.71450,
+            lon: position?.longitude ?? -76.20320,
+            address: position != null ? 'Ubicación móvil GPS (Pisco)' : 'Pisco, Ica - Ubicación móvil',
+          );
+        } else {
+          // Si el servicio nativo ya lo envió exitosamente, refrescar la lista de reportes
+          ReportStorageService.loadAllReports();
+          dispatchedAlertId = WhatsAppApiService.lastAlertId ?? 'ALT-${DateTime.now().millisecondsSinceEpoch}';
+        }
+
+        // Si es ROBO, activar rastreo GPS en vivo
+        if (alertType == 'ROBO') {
+          final position = await GpsLocationService.getCurrentLocation();
+          LocationTrackingService().startTracking(
+            alertId: dispatchedAlertId ?? 'ALT-${DateTime.now().millisecondsSinceEpoch}',
+            initialLat: position?.latitude ?? -13.71450,
+            initialLon: position?.longitude ?? -76.20320,
+          );
+        }
+
+        if (mounted) {
+          _showAlreadyDispatchedDialog(context, alertType, source);
+        }
       },
       onOpenStopTrackingDialog: () {
         if (!mounted) return;

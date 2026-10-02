@@ -2,7 +2,7 @@ import 'dart:developer' as developer;
 import 'package:flutter/services.dart';
 
 typedef HardwareTriggerCallback = void Function(String source, [String? alertType]);
-typedef EmergencyDispatchedCallback = void Function(String alertType, String source);
+typedef EmergencyDispatchedCallback = void Function(String alertType, String source, [bool nativeSuccess]);
 typedef StopTrackingDialogCallback = void Function();
 
 /// Servicio que interactúa con la capa nativa de Android para:
@@ -57,8 +57,9 @@ class HardwareTriggerService {
           final Map? args = call.arguments as Map?;
           final String source = args?['source'] as String? ?? 'power_button_3x';
           final String alertType = args?['alertType'] as String? ?? 'ROBO';
-          developer.log('✅ ALERTA CONFIRMADA DESPACHADA DESDE SEGUNDO PLANO: $alertType', name: 'HardwareTriggerService');
-          _onEmergencyDispatched?.call(alertType, source);
+          final bool nativeSuccess = args?['nativeSuccess'] == true;
+          developer.log('✅ ALERTA CONFIRMADA DESPACHADA DESDE SEGUNDO PLANO: $alertType (nativoOk: $nativeSuccess)', name: 'HardwareTriggerService');
+          _onEmergencyDispatched?.call(alertType, source, nativeSuccess);
           break;
 
         case 'onOpenStopTrackingDialog':
@@ -93,11 +94,12 @@ class HardwareTriggerService {
         final String source = pending['source'] as String? ?? 'power_button_3x';
         final String alertType = pending['alertType'] as String? ?? 'ROBO';
         final bool isDispatched = pending['isDispatched'] == true;
+        final bool nativeSuccess = pending['nativeSuccess'] == true;
 
         if (isDispatched) {
-          developer.log('🚨 ALERTA YA DESPACHADA EN SEGUNDO PLANO: $alertType ($source)', name: 'HardwareTriggerService');
+          developer.log('🚨 ALERTA YA DESPACHADA EN SEGUNDO PLANO: $alertType ($source, nativoOk: $nativeSuccess)', name: 'HardwareTriggerService');
           Future.delayed(const Duration(milliseconds: 350), () {
-            _onEmergencyDispatched?.call(alertType, source);
+            _onEmergencyDispatched?.call(alertType, source, nativeSuccess);
           });
         } else {
           developer.log('🚨 DISPARO PENDIENTE AL ABRIR LA APP: $source ($alertType)', name: 'HardwareTriggerService');
