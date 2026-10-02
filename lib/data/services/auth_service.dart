@@ -147,10 +147,14 @@ class AuthService {
         final displayName = fullName.isNotEmpty ? fullName : (nombres.isNotEmpty ? nombres : 'Ciudadano');
         final idPersona = user?['id_persona'] != null ? int.tryParse(user!['id_persona'].toString()) : null;
 
+        final dniVal = (user?['dni'] ?? cleanDni).toString().trim();
+        final defaultPin = dniVal.length >= 4 ? dniVal.substring(0, 4) : '7462';
+
         await SessionService.saveSession(
-          dni: user?['dni'] ?? cleanDni,
+          dni: dniVal,
           name: displayName,
           phone: user?['telefono'] ?? '+51 999 999 999',
+          secretPin: defaultPin,
           jwtToken: token,
           idPersona: idPersona,
         );

@@ -69,6 +69,10 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
           isDirectWhatsAppApi: true,
         );
       },
+      onEmergencyDispatched: (source, alertType) {
+        if (!mounted) return;
+        _showAlreadyDispatchedDialog(context, alertType, source);
+      },
       onOpenStopTrackingDialog: () {
         if (!mounted) return;
         _showStopTrackingDialog(context, LocationTrackingService());
@@ -101,6 +105,128 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
       source: 'BOTÓN ROJO PRINCIPAL',
       isDirectWhatsAppApi: true,
     );
+  }
+
+  static bool _isAlreadyDispatchedDialogOpen = false;
+
+  void _showAlreadyDispatchedDialog(
+    BuildContext context,
+    String alertType,
+    String source,
+  ) {
+    if (_isAlreadyDispatchedDialogOpen) return;
+    _isAlreadyDispatchedDialogOpen = true;
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: AppColors.accentGreen, width: 1.5),
+        ),
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: AppColors.accentGreen.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(8),
+              ),
+              child: const Icon(Icons.check_circle, color: AppColors.accentGreen, size: 24),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Alerta Enviada con Éxito',
+                style: GoogleFonts.inter(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: AppColors.surfaceElevated,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.accentGreen.withValues(alpha: 0.3)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.emergency_share, color: AppColors.primaryRed, size: 18),
+                      const SizedBox(width: 6),
+                      Text(
+                        'TIPO: $alertType',
+                        style: GoogleFonts.inter(
+                          fontWeight: FontWeight.bold,
+                          color: AppColors.primaryRed,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      const Icon(Icons.settings_remote, color: AppColors.textSecondary, size: 16),
+                      const SizedBox(width: 6),
+                      Text(
+                        'ORIGEN: $source',
+                        style: GoogleFonts.inter(
+                          color: AppColors.textSecondary,
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Tu alerta fue enviada automáticamente a la Central de Serenazgo con tus coordenadas GPS mientras la aplicación estaba cerrada o en segundo plano.\n\nLa Central de Monitoreo y Serenazgo ya cuenta con tu reporte y ubicación.',
+              style: GoogleFonts.inter(
+                fontSize: 13,
+                color: AppColors.textSecondary,
+                height: 1.4,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppColors.accentGreen,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+            ),
+            onPressed: () {
+              _isAlreadyDispatchedDialogOpen = false;
+              Navigator.of(ctx).pop();
+            },
+            child: Text(
+              'ENTENDIDO',
+              style: GoogleFonts.inter(fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    ).then((_) {
+      _isAlreadyDispatchedDialogOpen = false;
+    });
   }
 
   static bool _isStopTrackingDialogOpen = false;

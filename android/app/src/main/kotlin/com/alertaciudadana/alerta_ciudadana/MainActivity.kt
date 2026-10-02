@@ -107,17 +107,48 @@ class MainActivity : FlutterActivity() {
                     result.success(true)
                 }
                 "checkPendingTrigger" -> {
-                    if (pendingTriggerEmergency) {
-                        val response = mapOf(
-                            "hasPending" to true,
-                            "source" to pendingSource,
-                            "alertType" to pendingAlertType
-                        )
+                    val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                    val isDispatched = prefs.getBoolean("flutter.pending_emergency_dispatched", false) || EmergencyForegroundService.isEmergencyDispatched
+                    val isActive = prefs.getBoolean("flutter.pending_emergency_active", false) || EmergencyForegroundService.isEmergencyActive
+                    val source = prefs.getString("flutter.pending_emergency_source", pendingSource) ?: pendingSource
+                    val alertType = prefs.getString("flutter.pending_emergency_alert_type", pendingAlertType) ?: pendingAlertType
+
+                    if (isDispatched) {
+                        prefs.edit()
+                            .putBoolean("flutter.pending_emergency_dispatched", false)
+                            .putBoolean("flutter.pending_emergency_active", false)
+                            .apply()
+                        EmergencyForegroundService.isEmergencyDispatched = false
+                        EmergencyForegroundService.isEmergencyActive = false
                         pendingTriggerEmergency = false
-                        result.success(response)
+
+                        result.success(mapOf(
+                            "hasPending" to true,
+                            "isDispatched" to true,
+                            "source" to source,
+                            "alertType" to alertType
+                        ))
+                    } else if (isActive || pendingTriggerEmergency) {
+                        prefs.edit()
+                            .putBoolean("flutter.pending_emergency_active", false)
+                            .apply()
+                        EmergencyForegroundService.isEmergencyActive = false
+                        pendingTriggerEmergency = false
+
+                        result.success(mapOf(
+                            "hasPending" to true,
+                            "isDispatched" to false,
+                            "source" to source,
+                            "alertType" to alertType
+                        ))
                     } else {
                         result.success(mapOf("hasPending" to false))
                     }
+                }
+                "cancelEmergency" -> {
+                    EmergencyForegroundService.cancelEmergency(applicationContext)
+                    pendingTriggerEmergency = false
+                    result.success(true)
                 }
                 "checkPendingStopTracking" -> {
                     if (pendingStopTrackingPin) {
@@ -163,6 +194,12 @@ class MainActivity : FlutterActivity() {
             methodChannel?.invokeMethod("onPanicTriggered", mapOf("source" to source, "alertType" to alertType))
         }
         return true
+    }
+
+    fun onEmergencyDispatchedFromNative(alertType: String, source: String) {
+        runOnUiThread {
+            methodChannel?.invokeMethod("onEmergencyDispatched", mapOf("alertType" to alertType, "source" to source))
+        }
     }
 
     override fun onDestroy() {

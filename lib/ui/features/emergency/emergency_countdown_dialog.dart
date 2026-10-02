@@ -6,6 +6,7 @@ import '../../../data/services/whatsapp_api_service.dart';
 import '../../../data/services/location_tracking_service.dart';
 import '../../../data/services/session_service.dart';
 import '../../../data/services/gps_location_service.dart';
+import '../../../data/services/hardware_trigger_service.dart';
 import '../reports/new_report_view.dart';
 
 class EmergencyCountdownDialog extends StatefulWidget {
@@ -215,6 +216,7 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
     }
 
     _timer?.cancel();
+    HardwareTriggerService().cancelEmergency();
     if (!mounted) return;
     Navigator.of(context).pop();
     ScaffoldMessenger.of(context).showSnackBar(

@@ -158,12 +158,26 @@ class _ReportsListViewState extends State<_ReportsListView> {
   String _formatDate(String? rawDate) {
     if (rawDate == null) return 'Reciente';
     try {
-      final dt = DateTime.parse(rawDate).toLocal();
       final now = DateTime.now();
+      final parsed = DateTime.parse(rawDate);
+      DateTime dt;
+
+      // Soporte inteligente para reportes guardados con hora local de Perú pero sufijo UTC (+00:00)
+      final localWithoutTz = DateTime.parse(rawDate.replaceAll(RegExp(r'(\+00:00|Z)$'), ''));
+      final diffWithoutTz = now.difference(localWithoutTz);
+
+      if (parsed.isUtc && diffWithoutTz >= Duration.zero && diffWithoutTz < const Duration(hours: 4)) {
+        dt = localWithoutTz;
+      } else {
+        dt = parsed.isUtc ? parsed.toLocal() : parsed;
+      }
+
       final diff = now.difference(dt);
 
-      if (diff.inMinutes < 60) {
-        return 'Hace ${diff.inMinutes < 1 ? 1 : diff.inMinutes} min';
+      if (diff.isNegative || diff.inSeconds < 45) {
+        return 'Hace un momento';
+      } else if (diff.inMinutes < 60) {
+        return 'Hace ${diff.inMinutes} min';
       } else if (diff.inHours < 24) {
         return 'Hace ${diff.inHours} h';
       } else {
@@ -669,8 +683,10 @@ class _ProfileViewState extends State<_ProfileView> {
                   ),
                   _buildProfileTile(
                     Icons.lock_clock_outlined,
-                    'PIN de Cancelación',
-                    '4 dígitos protegidos mediante Hash Bcrypt',
+                    'PIN Secreto de Cancelación',
+                    'Toca para ver o cambiar tu PIN de 4 dígitos',
+                    trailing: const Icon(Icons.edit, color: AppColors.accentOrange, size: 18),
+                    onTap: () => _showChangePinDialog(context),
                   ),
                   const SizedBox(height: 32),
                   OutlinedButton.icon(
@@ -698,8 +714,106 @@ class _ProfileViewState extends State<_ProfileView> {
     );
   }
 
-  Widget _buildProfileTile(IconData icon, String title, String subtitle) {
-    return Container(
+  Future<void> _showChangePinDialog(BuildContext context) async {
+    final currentPin = await SessionService.getSecretPin();
+    final pinController = TextEditingController(text: currentPin);
+    if (!context.mounted) return;
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(16),
+          side: const BorderSide(color: AppColors.accentOrange, width: 1.5),
+        ),
+        title: Row(
+          children: [
+            const Icon(Icons.pin, color: AppColors.accentOrange, size: 24),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'PIN de Cancelación',
+                style: GoogleFonts.inter(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Este PIN de 4 dígitos te permite cancelar la alarma durante la cuenta regresiva de 5 segundos.',
+              style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+            ),
+            const SizedBox(height: 16),
+            TextField(
+              controller: pinController,
+              keyboardType: TextInputType.number,
+              maxLength: 4,
+              style: GoogleFonts.inter(
+                fontSize: 24,
+                color: Colors.white,
+                letterSpacing: 8,
+                fontWeight: FontWeight.bold,
+              ),
+              textAlign: TextAlign.center,
+              decoration: InputDecoration(
+                counterText: '',
+                hintText: '4 dígitos',
+                filled: true,
+                fillColor: AppColors.surfaceElevated,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text('CANCELAR', style: GoogleFonts.inter(color: Colors.white54)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.accentOrange),
+            onPressed: () async {
+              final newPin = pinController.text.trim();
+              if (newPin.length == 4 && int.tryParse(newPin) != null) {
+                await SessionService.setSecretPin(newPin);
+                if (ctx.mounted) Navigator.of(ctx).pop();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('PIN actualizado a $newPin con éxito'),
+                      backgroundColor: AppColors.accentGreen,
+                    ),
+                  );
+                  setState(() {});
+                }
+              }
+            },
+            child: Text(
+              'GUARDAR PIN',
+              style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: Colors.black),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProfileTile(
+    IconData icon,
+    String title,
+    String subtitle, {
+    VoidCallback? onTap,
+    Widget? trailing,
+  }) {
+    final content = Container(
       margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
@@ -730,8 +844,18 @@ class _ProfileViewState extends State<_ProfileView> {
               ],
             ),
           ),
+          ?trailing,
         ],
       ),
     );
+
+    if (onTap != null) {
+      return InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: content,
+      );
+    }
+    return content;
   }
 }

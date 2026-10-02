@@ -14,13 +14,23 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Location
+import android.location.LocationManager
 import android.os.Build
+import android.os.CountDownTimer
 import android.os.IBinder
 import android.os.PowerManager
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import androidx.core.app.NotificationCompat
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
+import java.util.TimeZone
 
 class EmergencyForegroundService : Service() {
 
@@ -46,6 +56,13 @@ class EmergencyForegroundService : Service() {
 
         var isServiceRunning = false
 
+        var activeCountdownTimer: CountDownTimer? = null
+        var isEmergencyActive: Boolean = false
+        var currentEmergencySource: String = "power_button_3x"
+        var currentEmergencyAlertType: String = "ROBO"
+        var emergencyTriggerTimestamp: Long = 0
+        var isEmergencyDispatched: Boolean = false
+
         fun startService(context: Context) {
             val intent = Intent(context, EmergencyForegroundService::class.java).apply {
                 action = ACTION_START_GUARD
@@ -69,7 +86,26 @@ class EmergencyForegroundService : Service() {
             }
         }
 
+        fun cancelEmergency(context: Context) {
+            activeCountdownTimer?.cancel()
+            activeCountdownTimer = null
+            isEmergencyActive = false
+            isEmergencyDispatched = false
+
+            try {
+                val prefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putBoolean("flutter.pending_emergency_active", false)
+                    .putBoolean("flutter.pending_emergency_dispatched", false)
+                    .apply()
+            } catch (_: Exception) {}
+
+            val notificationManager = context.getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+            notificationManager?.cancel(PANIC_NOTIFICATION_ID)
+        }
+
         fun stopService(context: Context) {
+            cancelEmergency(context)
             val intent = Intent(context, EmergencyForegroundService::class.java).apply {
                 action = ACTION_STOP_GUARD
             }
@@ -258,9 +294,35 @@ class EmergencyForegroundService : Service() {
     }
 
     private fun onTriplePowerPressDetected() {
-        // 1. Despacho INMEDIATO a la app viva (latencia 0ms)
+        startEmergencyFlow("power_button_3x", "ROBO", "Se detectaron 3 pulsaciones del botón de encendido")
+    }
+
+    private fun onAccidentDetected(magnitude: Float) {
+        startEmergencyFlow("sensor_impacto", "ACCIDENTE", "Impacto fuerte detectado: ${String.format(Locale.US, "%.1f", magnitude)} m/s²")
+    }
+
+    private fun startEmergencyFlow(source: String, alertType: String, detailInfo: String) {
+        isEmergencyActive = true
+        currentEmergencySource = source
+        currentEmergencyAlertType = alertType
+        emergencyTriggerTimestamp = System.currentTimeMillis()
+        isEmergencyDispatched = false
+
+        // Guardar estado en SharedPreferences
         try {
-            MainActivity.instance?.triggerPanicFromNative("power_button_3x", "ROBO")
+            val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+            prefs.edit()
+                .putBoolean("flutter.pending_emergency_active", true)
+                .putString("flutter.pending_emergency_source", source)
+                .putString("flutter.pending_emergency_alert_type", alertType)
+                .putLong("flutter.pending_emergency_time", emergencyTriggerTimestamp)
+                .putBoolean("flutter.pending_emergency_dispatched", false)
+                .apply()
+        } catch (_: Exception) {}
+
+        // 1. Despacho INMEDIATO a la app viva (si ya está abierta)
+        try {
+            MainActivity.instance?.triggerPanicFromNative(source, alertType)
         } catch (_: Exception) {}
 
         // 2. Despertar pantalla con WakeLock inmediatamente
@@ -270,7 +332,7 @@ class EmergencyForegroundService : Service() {
                 PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
                 "AlertaCiudadana:PanicWakeLock"
             )
-            wakeLock?.acquire(10000L)
+            wakeLock?.acquire(15000L)
         } catch (_: Exception) {}
 
         // 3. Crear Intent directo y lanzar actividad inmediatamente al frente
@@ -280,8 +342,8 @@ class EmergencyForegroundService : Service() {
                     Intent.FLAG_ACTIVITY_CLEAR_TOP or
                     Intent.FLAG_ACTIVITY_SINGLE_TOP
             putExtra(MainActivity.EXTRA_TRIGGER_EMERGENCY, true)
-            putExtra("source", "power_button_3x")
-            putExtra("alert_type", "ROBO")
+            putExtra("source", source)
+            putExtra("alert_type", alertType)
         }
         val fullScreenPendingIntent = PendingIntent.getActivity(
             this,
@@ -298,20 +360,49 @@ class EmergencyForegroundService : Service() {
         try {
             val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 300, 100, 300), -1))
+                vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 300, 150, 300, 150, 400), -1))
             } else {
                 @Suppress("DEPRECATION")
-                vibrator?.vibrate(longArrayOf(0, 300, 100, 300), -1)
+                vibrator?.vibrate(longArrayOf(0, 300, 150, 300, 150, 400), -1)
             }
         } catch (_: Exception) {}
 
-        // 5. Notificación de emergencia emergente (Full-Screen Intent / Heads-Up)
+        // 5. Iniciar la notificación con cuenta regresiva
+        updateEmergencyNotificationCountdown(5, alertType, fullScreenPendingIntent)
+
+        // 6. Iniciar temporizador nativo de 5 segundos
+        activeCountdownTimer?.cancel()
+        activeCountdownTimer = object : CountDownTimer(5000, 1000) {
+            override fun onTick(millisUntilFinished: Long) {
+                val seconds = (millisUntilFinished / 1000) + 1
+                if (isEmergencyActive && !isEmergencyDispatched) {
+                    updateEmergencyNotificationCountdown(seconds, alertType, fullScreenPendingIntent)
+                }
+            }
+
+            override fun onFinish() {
+                if (isEmergencyActive && !isEmergencyDispatched) {
+                    isEmergencyDispatched = true
+                    dispatchEmergencyAlertFromService(source, alertType)
+                }
+            }
+        }.start()
+    }
+
+    private fun updateEmergencyNotificationCountdown(secondsLeft: Long, alertType: String, fullScreenPendingIntent: PendingIntent) {
         val smallIcon = applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_lock_idle_alarm
+        val title = if (alertType == "ACCIDENTE") {
+            "🚗 ¡ACCIDENTE DETECTADO! ($secondsLeft seg)"
+        } else {
+            "🚨 ¡ALERTA DE ROBO ACTIVADA! ($secondsLeft seg)"
+        }
+        val text = "Despachando alerta en $secondsLeft segundos. Toca para ingresar PIN y cancelar."
+
         val alarmNotification = NotificationCompat.Builder(this, EMERGENCY_ALARM_CHANNEL_ID)
             .setSmallIcon(smallIcon)
-            .setContentTitle("🚨 ¡ALERTA DE ROBO ACTIVADA! (5 seg)")
-            .setContentText("Toca de inmediato para abrir y cancelar con tu PIN secreto")
-            .setStyle(NotificationCompat.BigTextStyle().bigText("Se detectaron 3 pulsaciones del botón de encendido.\nSi fue accidental, toca aquí de inmediato o presiona CANCELAR para ingresar tu PIN."))
+            .setContentTitle(title)
+            .setContentText(text)
+            .setStyle(NotificationCompat.BigTextStyle().bigText("$text\nSi fue una falsa alarma, ingresa tu PIN."))
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
@@ -330,77 +421,161 @@ class EmergencyForegroundService : Service() {
         notificationManager?.notify(PANIC_NOTIFICATION_ID, alarmNotification)
     }
 
-    private fun onAccidentDetected(magnitude: Float) {
-        // 1. Despacho INMEDIATO a la app viva
-        try {
-            MainActivity.instance?.triggerPanicFromNative("sensor_impacto", "ACCIDENTE")
-        } catch (_: Exception) {}
+    private fun dispatchEmergencyAlertFromService(source: String, alertType: String) {
+        Thread {
+            try {
+                // 1. Obtener última ubicación GPS
+                val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+                var bestLocation: Location? = null
+                try {
+                    val gpsLoc = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                    val netLoc = locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                    bestLocation = when {
+                        gpsLoc != null && netLoc != null -> if (gpsLoc.time > netLoc.time) gpsLoc else netLoc
+                        gpsLoc != null -> gpsLoc
+                        else -> netLoc
+                    }
+                } catch (_: Exception) {}
 
-        // 2. Despertar pantalla con WakeLock inmediatamente
-        try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
-            val wakeLock = powerManager?.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "AlertaCiudadana:AccidentWakeLock"
-            )
-            wakeLock?.acquire(10000L)
-        } catch (_: Exception) {}
+                val lat = bestLocation?.latitude ?: -13.71450
+                val lon = bestLocation?.longitude ?: -76.20320
 
-        // 3. Crear Intent directo y lanzar actividad al frente
-        val fullScreenIntent = Intent(this, MainActivity::class.java).apply {
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
-                    Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
-                    Intent.FLAG_ACTIVITY_CLEAR_TOP or
-                    Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra(MainActivity.EXTRA_TRIGGER_EMERGENCY, true)
-            putExtra("source", "sensor_impacto")
-            putExtra("alert_type", "ACCIDENTE")
+                // 2. Leer datos del ciudadano desde SharedPreferences
+                val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                val citizenDni = prefs.getString("flutter.app_session_user_dni", "74629337") ?: "74629337"
+                val idPersona = prefs.getInt("flutter.app_session_user_id_persona", 3)
+
+                val headline = if (alertType == "ACCIDENTE") {
+                    "🚗💥 ¡ACCIDENTE DE TRÁNSITO! AMBULANCIA Y POLICÍA REQUERIDA 🚗💥"
+                } else {
+                    "🚨 ¡AUXILIO! ME ESTÁN ROBANDO 🚨"
+                }
+                val triggerLabel = if (source == "power_button_3x") {
+                    "BOTÓN DE ENCENDIDO (3X) [MODO BOLSILLO / APP CERRADA]"
+                } else {
+                    "SENSOR DE IMPACTO / ACCIDENTE [APP CERRADA]"
+                }
+                val gmapsUrl = "https://maps.google.com/?q=${String.format(Locale.US, "%.5f,%.5f", lat, lon)}"
+                val gmapsNav = "https://www.google.com/maps/dir/?api=1&destination=${String.format(Locale.US, "%.5f,%.5f", lat, lon)}"
+
+                val message = "$headline\n" +
+                        "📍 Ubicación: Ubicación móvil GPS (Pisco)\n" +
+                        "🛰️ Coordenadas: Lat ${String.format(Locale.US, "%.5f", lat)}, Lon ${String.format(Locale.US, "%.5f", lon)}\n" +
+                        "🗺️ Mapa: $gmapsUrl\n" +
+                        "🚗 Cómo llegar: $gmapsNav\n" +
+                        "⚡ Disparador: $triggerLabel\n" +
+                        "🛡️ Despacho automático WhatsApp API a la Central de Video Vigilancia."
+
+                // 3. Despachar mensaje a WhatsApp vía Green-API
+                try {
+                    val waUrl = URL("https://7105.api.greenapi.com/waInstance710522731795/sendMessage/1d98a458d1a64672abcff255236d807432183678856b42cfba")
+                    val conn = waUrl.openConnection() as HttpURLConnection
+                    conn.requestMethod = "POST"
+                    conn.setRequestProperty("Content-Type", "application/json")
+                    conn.doOutput = true
+                    val jsonBody = JSONObject().apply {
+                        put("chatId", "51976264949@c.us")
+                        put("message", message)
+                    }
+                    val os = conn.outputStream
+                    os.write(jsonBody.toString().toByteArray(Charsets.UTF_8))
+                    os.flush()
+                    os.close()
+                    val code = conn.responseCode
+                    conn.disconnect()
+                } catch (_: Exception) {}
+
+                // 4. Registrar reporte en Supabase
+                try {
+                    val df = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                        timeZone = TimeZone.getTimeZone("UTC")
+                    }
+                    val nowUtcIso = df.format(Date())
+
+                    val supabaseUrl = URL("https://emtzprcntefzkvvzmhfk.supabase.co/rest/v1/reporte")
+                    val sConn = supabaseUrl.openConnection() as HttpURLConnection
+                    sConn.requestMethod = "POST"
+                    sConn.setRequestProperty("Content-Type", "application/json")
+                    sConn.setRequestProperty("apikey", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
+                    sConn.setRequestProperty("Authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
+                    sConn.setRequestProperty("Prefer", "return=representation")
+                    sConn.doOutput = true
+
+                    val sBody = JSONObject().apply {
+                        put("id_persona", idPersona)
+                        put("id_tipo", if (alertType == "ACCIDENTE") 4 else 1)
+                        put("id_estado", 1)
+                        put("fecha_hora", nowUtcIso)
+                        put("descripcion", message)
+                        put("direccion_texto", "Ubicación móvil GPS (Pisco)")
+                    }
+                    val sOs = sConn.outputStream
+                    sOs.write(sBody.toString().toByteArray(Charsets.UTF_8))
+                    sOs.flush()
+                    sOs.close()
+                    val sCode = sConn.responseCode
+                    sConn.disconnect()
+                } catch (_: Exception) {}
+
+                // 5. Guardar estado de despacho en SharedPreferences para que Flutter lo detecte al abrir
+                prefs.edit()
+                    .putBoolean("flutter.pending_emergency_dispatched", true)
+                    .putBoolean("flutter.pending_emergency_active", false)
+                    .putString("flutter.last_dispatched_alert_type", alertType)
+                    .putString("flutter.last_dispatched_source", source)
+                    .putLong("flutter.last_dispatched_time", System.currentTimeMillis())
+                    .apply()
+
+                // 6. Activar rastreo en vivo si es ROBO
+                if (alertType == "ROBO") {
+                    isLiveTrackingActive = true
+                    val notif = buildCurrentNotification()
+                    val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                    manager?.notify(NOTIFICATION_ID, notif)
+                }
+
+                // 7. Vibración de confirmación
+                val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator?.vibrate(VibrationEffect.createOneShot(500, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(500)
+                }
+
+                // 8. Actualizar notificación permanente de alarma a despachado
+                showDispatchedNotification(alertType)
+
+                // 9. Si MainActivity está abierta o se abre, informarle
+                MainActivity.instance?.runOnUiThread {
+                    MainActivity.instance?.onEmergencyDispatchedFromNative(alertType, source)
+                }
+            } catch (_: Exception) {}
+        }.start()
+    }
+
+    private fun showDispatchedNotification(alertType: String) {
+        val appIntent = Intent(this, MainActivity::class.java).apply {
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP
         }
-        val fullScreenPendingIntent = PendingIntent.getActivity(
+        val appPendingIntent = PendingIntent.getActivity(
             this,
-            998,
-            fullScreenIntent,
+            1005,
+            appIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-
-        try {
-            startActivity(fullScreenIntent)
-        } catch (_: Exception) {}
-
-        // 4. Vibración de advertencia
-        try {
-            val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 500, 200, 500), -1))
-            } else {
-                @Suppress("DEPRECATION")
-                vibrator?.vibrate(longArrayOf(0, 500, 200, 500), -1)
-            }
-        } catch (_: Exception) {}
-
-        // 5. Notificación emergente (Full-Screen Intent / Heads-Up)
         val smallIcon = applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_lock_idle_alarm
-        val alarmNotification = NotificationCompat.Builder(this, EMERGENCY_ALARM_CHANNEL_ID)
+        val notification = NotificationCompat.Builder(this, EMERGENCY_ALARM_CHANNEL_ID)
             .setSmallIcon(smallIcon)
-            .setContentTitle("🚗 ¡POSIBLE ACCIDENTE / IMPACTO DETECTADO!")
-            .setContentText("Cuenta regresiva iniciada. Toca para cancelar si estás bien.")
-            .setStyle(NotificationCompat.BigTextStyle().bigText("Se detectó un impacto fuerte (${String.format("%.1f", magnitude)} m/s²).\nSi estás bien, toca aquí para cancelar con tu PIN antes de que se alerte a las autoridades y familiares."))
-            .setPriority(NotificationCompat.PRIORITY_MAX)
-            .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setFullScreenIntent(fullScreenPendingIntent, true)
-            .setOngoing(false)
+            .setContentTitle("✅ ALERTA DE $alertType ENVIADA A LA CENTRAL")
+            .setContentText("Ubicación GPS transmitida con éxito. Toca para ver en la app.")
+            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setContentIntent(appPendingIntent)
             .setAutoCancel(true)
-            .setContentIntent(fullScreenPendingIntent)
-            .addAction(
-                android.R.drawable.ic_menu_close_clear_cancel,
-                "❌ ESTOY BIEN (CANCELAR)",
-                fullScreenPendingIntent
-            )
             .build()
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-        notificationManager?.notify(PANIC_NOTIFICATION_ID, alarmNotification)
+        notificationManager?.notify(PANIC_NOTIFICATION_ID, notification)
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {

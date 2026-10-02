@@ -133,7 +133,7 @@ class ReportStorageService {
     bool isSuccessfullyDispatched = false,
   }) async {
     final prefs = await SharedPreferences.getInstance();
-    final nowIso = DateTime.now().toIso8601String();
+    final nowIso = DateTime.now().toUtc().toIso8601String();
     final idTipo = getTipoId(category);
 
     // 1. Procesar fotografías a Base64

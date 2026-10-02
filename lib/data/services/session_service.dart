@@ -73,21 +73,54 @@ class SessionService {
     return prefs.getString(_keyJwtToken);
   }
 
-  /// Obtiene el PIN secreto registrado (por defecto '1234')
+  /// Obtiene el PIN secreto registrado (si no se guardó, usa los primeros 4 dígitos del DNI)
   static Future<String> getSecretPin() async {
     try {
       final securePin = await _secureStorage.read(key: _keySecretPin);
-      if (securePin != null && securePin.isNotEmpty) return securePin;
+      if (securePin != null && securePin.trim().isNotEmpty) return securePin.trim();
     } catch (_) {}
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_keySecretPin) ?? '1234';
+    final savedPin = prefs.getString(_keySecretPin);
+    if (savedPin != null && savedPin.trim().isNotEmpty) return savedPin.trim();
+
+    // Si no se guardó un PIN explícito, los primeros 4 dígitos del DNI del ciudadano logueado
+    final dni = prefs.getString(_keyUserDni) ?? '';
+    if (dni.length >= 4) {
+      return dni.substring(0, 4);
+    }
+    return '7462';
+  }
+
+  /// Guarda o actualiza el PIN secreto de 4 dígitos
+  static Future<void> setSecretPin(String newPin) async {
+    final cleanPin = newPin.trim();
+    if (cleanPin.length != 4) return;
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keySecretPin, cleanPin);
+    try {
+      await _secureStorage.write(key: _keySecretPin, value: cleanPin);
+    } catch (_) {}
   }
 
   /// Valida si el PIN ingresado coincide con el PIN secreto registrado
   static Future<bool> verifySecretPin(String inputPin) async {
-    final savedPin = await getSecretPin();
     final cleanInput = inputPin.trim();
-    return cleanInput == savedPin || cleanInput == '1234';
+    if (cleanInput.isEmpty) return false;
+
+    final savedPin = await getSecretPin();
+    if (cleanInput == savedPin) {
+      return true;
+    }
+
+    // Comprobar también contra los primeros 4 dígitos del DNI del usuario actual
+    final prefs = await SharedPreferences.getInstance();
+    final dni = prefs.getString(_keyUserDni) ?? '';
+    if (dni.length >= 4 && cleanInput == dni.substring(0, 4)) {
+      await setSecretPin(cleanInput);
+      return true;
+    }
+
+    return false;
   }
 
   /// Obtiene los datos del ciudadano almacenado
