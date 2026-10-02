@@ -69,6 +69,9 @@ class MainActivity : FlutterActivity() {
         if (intent.getBooleanExtra(EXTRA_TRIGGER_EMERGENCY, false)) {
             val src = intent.getStringExtra("source") ?: "power_button_3x"
             val alertType = intent.getStringExtra("alert_type") ?: "ROBO"
+            intent.removeExtra(EXTRA_TRIGGER_EMERGENCY)
+            intent.removeExtra("source")
+            intent.removeExtra("alert_type")
             pendingTriggerEmergency = true
             pendingSource = src
             pendingAlertType = alertType
@@ -76,6 +79,7 @@ class MainActivity : FlutterActivity() {
         }
 
         if (intent.getBooleanExtra(EXTRA_STOP_TRACKING_PIN, false)) {
+            intent.removeExtra(EXTRA_STOP_TRACKING_PIN)
             pendingStopTrackingPin = true
             runOnUiThread {
                 methodChannel?.invokeMethod("onOpenStopTrackingDialog", null)
@@ -183,16 +187,19 @@ class MainActivity : FlutterActivity() {
     private var lastPanicTriggerTime: Long = 0
 
     fun triggerPanicFromNative(source: String, alertType: String = "ROBO"): Boolean {
-        pendingTriggerEmergency = true
         pendingSource = source
         pendingAlertType = alertType
-        if (methodChannel == null) return false
+        if (methodChannel == null) {
+            pendingTriggerEmergency = true
+            return false
+        }
         val now = System.currentTimeMillis()
-        if (now - lastPanicTriggerTime < 1200) {
-            // Ignorar disparos duplicados dentro de 1.2 segundos
+        if (now - lastPanicTriggerTime < 2500) {
+            // Ignorar disparos duplicados dentro de 2.5 segundos
             return true
         }
         lastPanicTriggerTime = now
+        pendingTriggerEmergency = false
         runOnUiThread {
             methodChannel?.invokeMethod("onPanicTriggered", mapOf("source" to source, "alertType" to alertType))
         }

@@ -34,7 +34,9 @@ import java.util.TimeZone
 
 class EmergencyForegroundService : Service() {
 
-    private val powerPressTimestamps = mutableListOf<Long>()
+    private var lastScreenTransitionState: Boolean? = null
+    private var lastScreenTransitionTime: Long = 0
+    private var rapidPressCount: Int = 0
     private var screenReceiver: BroadcastReceiver? = null
     private var isLiveTrackingActive: Boolean = false
 
@@ -241,20 +243,36 @@ class EmergencyForegroundService : Service() {
                     return
                 }
 
-                // Filtrar rebote de hardware o ruidos espurios de proximidad (mínimo 140ms entre pulsaciones)
-                val lastTimestamp = powerPressTimestamps.lastOrNull()
-                if (lastTimestamp != null && (now - lastTimestamp < 140)) {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                val isInteractive = powerManager?.isInteractive ?: (intent?.action == Intent.ACTION_SCREEN_ON)
+
+                // 1. Descartar eventos duplicados que no representen un cambio de estado real
+                // (evita que Always On Display (AOD), ambient display o rebotes del driver sumen eventos)
+                if (lastScreenTransitionState != null && lastScreenTransitionState == isInteractive) {
                     return
                 }
 
-                powerPressTimestamps.add(now)
+                // 2. Debounce mínimo: un humano no puede pulsar físicamente el botón en menos de 160ms
+                val timeSinceLast = now - lastScreenTransitionTime
+                if (timeSinceLast < 160) {
+                    return
+                }
 
-                // Ventana ágil: Las 3 pulsaciones deben ocurrir dentro de una ventana máxima de 1800ms
-                powerPressTimestamps.removeAll { now - it > 1800 }
+                // 3. Caducidad: Si pasó más de 1000ms (1 segundo) desde la última pulsación,
+                // no es una ráfaga rápida de 3 clics por pánico/desesperación. Se reinicia el conteo a 1.
+                if (timeSinceLast > 1000) {
+                    rapidPressCount = 1
+                } else {
+                    rapidPressCount++
+                }
 
-                // REGLA ESTRICTA: Requiere exactamente un mínimo de 3 pulsaciones reales del botón
-                if (powerPressTimestamps.size >= 3) {
-                    powerPressTimestamps.clear()
+                lastScreenTransitionTime = now
+                lastScreenTransitionState = isInteractive
+
+                // 4. REGLA ESTRICTA: Solo dispara cuando se completan exactamente al menos 3 pulsaciones rápidas consecutivas
+                if (rapidPressCount >= 3) {
+                    rapidPressCount = 0
+                    lastScreenTransitionState = null
                     if (now - lastButtonTriggerTime > 3500) {
                         lastButtonTriggerTime = now
                         onTriplePowerPressDetected()
@@ -290,12 +308,10 @@ class EmergencyForegroundService : Service() {
                             val z = event.values[2]
                             // Magnitud total incluyendo gravedad (9.8 m/s²)
                             val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble()).toFloat()
-                            val dynamicJerk = Math.abs(magnitude - 9.8f)
 
-                            // Calibración estilo Google Theft Detection Lock:
-                            // Arrebato violento de mano / tironazo: magnitud > 21.0 m/s² (~2.14G)
-                            // o jerk dinámico > 11.5 m/s²
-                            if (magnitude > 21.0f || dynamicJerk > 11.5f) {
+                            // Umbral calibrado de arrebato violento de celular (> 28.5 m/s², aprox 2.9G):
+                            // Evita falsos positivos por pulsar el botón con fuerza, caminar, trotar o sentarse
+                            if (magnitude > 28.5f) {
                                 lastTheftTriggerTime = now
                                 onTheftSnatchDetected(
                                     "sensor_antirrobo_acelerometro",
@@ -310,8 +326,9 @@ class EmergencyForegroundService : Service() {
                             // Velocidad angular total
                             val rotMagnitude = Math.sqrt((rx * rx + ry * ry + rz * rz).toDouble()).toFloat()
 
-                            // Forcejeo brusco o giro violento al arrebatar el teléfono (> 5.5 rad/s, aprox 315°/s)
-                            if (rotMagnitude > 5.5f) {
+                            // Forcejeo violento al arrebatar el teléfono (> 8.5 rad/s, aprox 487°/s):
+                            // Evita falsos positivos por giros rápidos de muñeca o cambiar de mano
+                            if (rotMagnitude > 8.5f) {
                                 lastTheftTriggerTime = now
                                 onTheftSnatchDetected(
                                     "sensor_antirrobo_giroscopio",

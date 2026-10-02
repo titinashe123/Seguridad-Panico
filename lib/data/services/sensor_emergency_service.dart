@@ -21,16 +21,13 @@ class SensorEmergencyService {
   bool get isListening => _isListening;
 
   /// Umbral de aceleración para detectar un arrebato violento de celular (m/s²)
-  /// Calibrado según patrones de Google Theft Detection Lock:
-  /// En reposo/caminar normal la gravedad es 9.8 m/s². Un tirón brusco o arrebato genera picos > 21.0 m/s².
-  double snatchAccelerationThreshold = 21.0;
+  /// Un tirón brusco real al arrebatar el teléfono genera aceleraciones superiores a 28.5 m/s² (~2.9G).
+  /// Esto previene falsos positivos al presionar botones físicos con fuerza, caminar o sentarse.
+  double snatchAccelerationThreshold = 28.5;
 
-  /// Umbral de tirón dinámico |magnitud - gravedad| (m/s²)
-  double dynamicJerkThreshold = 11.5;
-
-  /// Umbral de rotación brusca para el giroscopio ante forcejeo de robo (rad/s)
-  /// Más de 5.5 rad/s equivale a > 315°/seg de giro violento
-  double struggleGyroThreshold = 5.5;
+  /// Umbral de rotación brusca para el giroscopio ante forcejeo violento de robo (rad/s)
+  /// Más de 8.5 rad/s equivale a > 487°/seg de giro violento (evita falsos giros rápidos de muñeca).
+  double struggleGyroThreshold = 8.5;
 
   DateTime? _lastTriggerTime;
 
@@ -76,9 +73,8 @@ class SensorEmergencyService {
   void _handleAccelerometer(double x, double y, double z) {
     // Calcular magnitud total del vector de aceleración: sqrt(x^2 + y^2 + z^2)
     final magnitude = math.sqrt(x * x + y * y + z * z);
-    final dynamicJerk = (magnitude - 9.8).abs();
 
-    if (magnitude > snatchAccelerationThreshold || dynamicJerk > dynamicJerkThreshold) {
+    if (magnitude > snatchAccelerationThreshold) {
       _dispatchEmergencyIfReady(
         reason: 'Arrebato violento de celular detectado (${magnitude.toStringAsFixed(1)} m/s²)',
         source: 'sensor_antirrobo_acelerometro',
