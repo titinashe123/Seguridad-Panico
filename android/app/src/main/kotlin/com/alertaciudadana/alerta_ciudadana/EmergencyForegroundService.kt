@@ -236,26 +236,24 @@ class EmergencyForegroundService : Service() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val now = System.currentTimeMillis()
 
-                // Si ya está activa la emergencia o en cuenta regresiva, NO reiniciar ni cancelar
+                // Si ya está activa la emergencia o en cuenta regresiva, NO reiniciar ni alterar
                 if (isEmergencyActive) {
                     return
                 }
 
+                // Filtrar rebote de hardware o ruidos espurios de proximidad (mínimo 140ms entre pulsaciones)
                 val lastTimestamp = powerPressTimestamps.lastOrNull()
-                val delta = if (lastTimestamp != null) now - lastTimestamp else 9999L
+                if (lastTimestamp != null && (now - lastTimestamp < 140)) {
+                    return
+                }
+
                 powerPressTimestamps.add(now)
 
-                // Ventana ágil para pulsaciones rápidas por desesperación (2200ms)
-                powerPressTimestamps.removeAll { now - it > 2200 }
+                // Ventana ágil: Las 3 pulsaciones deben ocurrir dentro de una ventana máxima de 1800ms
+                powerPressTimestamps.removeAll { now - it > 1800 }
 
-                // Detección de ráfaga:
-                // 1) 3 pulsaciones detectadas en <= 2200ms
-                // 2) O pulsación ultra rápida de desesperación (< 550ms entre eventos)
-                //    donde el controlador de pantalla de Android consolida o salta un ciclo
-                val isThreePresses = powerPressTimestamps.size >= 3
-                val isUltraFastSpam = powerPressTimestamps.size >= 2 && delta < 550
-
-                if (isThreePresses || isUltraFastSpam) {
+                // REGLA ESTRICTA: Requiere exactamente un mínimo de 3 pulsaciones reales del botón
+                if (powerPressTimestamps.size >= 3) {
                     powerPressTimestamps.clear()
                     if (now - lastButtonTriggerTime > 3500) {
                         lastButtonTriggerTime = now
