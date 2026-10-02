@@ -20,12 +20,17 @@ class SensorEmergencyService {
   bool _isListening = false;
   bool get isListening => _isListening;
 
-  /// Umbral de aceleración para detectar un impacto o caída severa (m/s^2)
-  /// La gravedad normal es aprox 9.8 m/s^2. Una caída o impacto violento supera 26-30 m/s^2.
-  double impactThreshold = 28.0;
+  /// Umbral de aceleración para detectar un arrebato violento de celular (m/s²)
+  /// Calibrado según patrones de Google Theft Detection Lock:
+  /// En reposo/caminar normal la gravedad es 9.8 m/s². Un tirón brusco o arrebato genera picos > 21.0 m/s².
+  double snatchAccelerationThreshold = 21.0;
 
-  /// Umbral de rotación brusca para el giroscopio (rad/s)
-  double gyroRotationThreshold = 8.5;
+  /// Umbral de tirón dinámico |magnitud - gravedad| (m/s²)
+  double dynamicJerkThreshold = 11.5;
+
+  /// Umbral de rotación brusca para el giroscopio ante forcejeo de robo (rad/s)
+  /// Más de 5.5 rad/s equivale a > 315°/seg de giro violento
+  double struggleGyroThreshold = 5.5;
 
   DateTime? _lastTriggerTime;
 
@@ -62,7 +67,7 @@ class SensorEmergencyService {
         cancelOnError: false,
       );
 
-      developer.log('Sensores (Acelerómetro y Giroscopio) activos en monitoreo continuo', name: 'SensorEmergencyService');
+      developer.log('Sensores Antirrobo (Acelerómetro y Giroscopio) activos en monitoreo continuo', name: 'SensorEmergencyService');
     } catch (e) {
       developer.log('Dispositivo no soporta sensores de movimiento nativos o web: $e', name: 'SensorEmergencyService');
     }
@@ -71,11 +76,12 @@ class SensorEmergencyService {
   void _handleAccelerometer(double x, double y, double z) {
     // Calcular magnitud total del vector de aceleración: sqrt(x^2 + y^2 + z^2)
     final magnitude = math.sqrt(x * x + y * y + z * z);
+    final dynamicJerk = (magnitude - 9.8).abs();
 
-    if (magnitude > impactThreshold) {
+    if (magnitude > snatchAccelerationThreshold || dynamicJerk > dynamicJerkThreshold) {
       _dispatchEmergencyIfReady(
-        reason: 'Impacto o Caída Violenta detectada (${magnitude.toStringAsFixed(1)} m/s²)',
-        source: 'sensor_acelerometro',
+        reason: 'Arrebato violento de celular detectado (${magnitude.toStringAsFixed(1)} m/s²)',
+        source: 'sensor_antirrobo_acelerometro',
       );
     }
   }
@@ -84,33 +90,36 @@ class SensorEmergencyService {
     // Magnitud de rotación angular
     final rotMagnitude = math.sqrt(x * x + y * y + z * z);
 
-    if (rotMagnitude > gyroRotationThreshold) {
+    if (rotMagnitude > struggleGyroThreshold) {
       _dispatchEmergencyIfReady(
-        reason: 'Rotación brusca o forcejeo detectado (${rotMagnitude.toStringAsFixed(1)} rad/s)',
-        source: 'sensor_giroscopio',
+        reason: 'Forcejeo o giro violento detectado (${rotMagnitude.toStringAsFixed(1)} rad/s)',
+        source: 'sensor_antirrobo_giroscopio',
       );
     }
   }
 
   void _dispatchEmergencyIfReady({required String reason, required String source}) {
     final now = DateTime.now();
-    // Cooldown de 12 segundos para prevenir múltiples disparos seguidos por el mismo impacto
-    if (_lastTriggerTime != null && now.difference(_lastTriggerTime!).inSeconds < 12) {
+    // Cooldown de 8 segundos para prevenir múltiples disparos seguidos por el mismo arrebato
+    if (_lastTriggerTime != null && now.difference(_lastTriggerTime!).inSeconds < 8) {
       return;
     }
     _lastTriggerTime = now;
 
-    developer.log('🚨 DISPARO POR SENSOR: $reason (Origen: $source)', name: 'SensorEmergencyService');
+    developer.log('🚨 DISPARO POR SENSOR ANTIRROBO: $reason (Origen: $source)', name: 'SensorEmergencyService');
     _onEmergencyTriggered?.call(reason, source);
   }
 
-  /// Método para simular un impacto/caída violenta (útil en emuladores o navegador web)
-  void simulateImpactTrigger() {
+  /// Método para simular un arrebato de celular (útil en pruebas)
+  void simulateTheftSnatchTrigger() {
     _dispatchEmergencyIfReady(
-      reason: 'Prueba de Sensor: Impacto simulado a 32.4 m/s²',
-      source: 'sensor_simulado',
+      reason: 'Simulación Antirrobo: Arrebato detectado a 24.2 m/s²',
+      source: 'sensor_simulado_robo',
     );
   }
+
+  /// Alias de compatibilidad previa
+  void simulateImpactTrigger() => simulateTheftSnatchTrigger();
 
   /// Detiene la escucha de sensores
   void stopMonitoring() {

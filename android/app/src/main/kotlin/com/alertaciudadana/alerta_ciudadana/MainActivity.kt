@@ -205,6 +205,35 @@ class MainActivity : FlutterActivity() {
         }
     }
 
+    private val keyPressTimestamps = mutableListOf<Long>()
+    private var lastKeyTriggerTime: Long = 0
+
+    override fun dispatchKeyEvent(event: android.view.KeyEvent?): Boolean {
+        if (event != null && event.action == android.view.KeyEvent.ACTION_DOWN) {
+            val keyCode = event.keyCode
+            // Soporta botón de bajar volumen o botón de encendido en ráfaga rápida
+            if (keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == android.view.KeyEvent.KEYCODE_POWER) {
+                val now = System.currentTimeMillis()
+                val lastTime = keyPressTimestamps.lastOrNull()
+                val delta = if (lastTime != null) now - lastTime else 9999L
+                keyPressTimestamps.add(now)
+                keyPressTimestamps.removeAll { now - it > 2000 }
+
+                val isThreePresses = keyPressTimestamps.size >= 3
+                val isUltraFastSpam = keyPressTimestamps.size >= 2 && delta < 550
+
+                if (isThreePresses || isUltraFastSpam) {
+                    keyPressTimestamps.clear()
+                    if (now - lastKeyTriggerTime > 3000) {
+                        lastKeyTriggerTime = now
+                        triggerPanicFromNative("physical_button_3x", "ROBO")
+                    }
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onDestroy() {
         if (instance == this) {
             instance = null

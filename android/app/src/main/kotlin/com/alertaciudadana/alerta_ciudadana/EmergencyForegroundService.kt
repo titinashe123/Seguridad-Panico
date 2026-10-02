@@ -40,8 +40,10 @@ class EmergencyForegroundService : Service() {
 
     private var sensorManager: SensorManager? = null
     private var accelerometer: Sensor? = null
+    private var gyroscope: Sensor? = null
     private var sensorEventListener: SensorEventListener? = null
-    private var lastAccidentTriggerTime: Long = 0
+    private var lastTheftTriggerTime: Long = 0
+    private var lastButtonTriggerTime: Long = 0
 
     companion object {
         const val CHANNEL_ID = "alerta_ciudadana_protection_channel"
@@ -233,14 +235,32 @@ class EmergencyForegroundService : Service() {
         screenReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
                 val now = System.currentTimeMillis()
+
+                // Si ya está activa la emergencia o en cuenta regresiva, NO reiniciar ni cancelar
+                if (isEmergencyActive) {
+                    return
+                }
+
+                val lastTimestamp = powerPressTimestamps.lastOrNull()
+                val delta = if (lastTimestamp != null) now - lastTimestamp else 9999L
                 powerPressTimestamps.add(now)
 
-                // Ventana ágil para 3 pulsaciones rápidas (2200ms)
+                // Ventana ágil para pulsaciones rápidas por desesperación (2200ms)
                 powerPressTimestamps.removeAll { now - it > 2200 }
 
-                if (powerPressTimestamps.size >= 3) {
+                // Detección de ráfaga:
+                // 1) 3 pulsaciones detectadas en <= 2200ms
+                // 2) O pulsación ultra rápida de desesperación (< 550ms entre eventos)
+                //    donde el controlador de pantalla de Android consolida o salta un ciclo
+                val isThreePresses = powerPressTimestamps.size >= 3
+                val isUltraFastSpam = powerPressTimestamps.size >= 2 && delta < 550
+
+                if (isThreePresses || isUltraFastSpam) {
                     powerPressTimestamps.clear()
-                    onTriplePowerPressDetected()
+                    if (now - lastButtonTriggerTime > 3500) {
+                        lastButtonTriggerTime = now
+                        onTriplePowerPressDetected()
+                    }
                 }
             }
         }
@@ -253,32 +273,65 @@ class EmergencyForegroundService : Service() {
         try {
             sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
             accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-            if (accelerometer != null) {
-                sensorEventListener = object : SensorEventListener {
-                    override fun onSensorChanged(event: SensorEvent?) {
-                        if (event == null) return
-                        val x = event.values[0]
-                        val y = event.values[1]
-                        val z = event.values[2]
-                        // Magnitud de aceleración total (incluyendo gravedad 9.8 m/s²)
-                        val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble()).toFloat()
-                        // Umbral de impacto severo o caída brusca (28.0 m/s², aprox 2.85G)
-                        if (magnitude > 28.0f) {
-                            val now = System.currentTimeMillis()
-                            if (now - lastAccidentTriggerTime > 10000) { // Debounce de 10s
-                                lastAccidentTriggerTime = now
-                                onAccidentDetected(magnitude)
+            gyroscope = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+
+            sensorEventListener = object : SensorEventListener {
+                override fun onSensorChanged(event: SensorEvent?) {
+                    if (event == null) return
+                    val now = System.currentTimeMillis()
+
+                    // Debounce de 8 segundos y no re-disparar si ya hay una emergencia activa
+                    if (isEmergencyActive || (now - lastTheftTriggerTime <= 8000)) {
+                        return
+                    }
+
+                    when (event.sensor.type) {
+                        Sensor.TYPE_ACCELEROMETER -> {
+                            val x = event.values[0]
+                            val y = event.values[1]
+                            val z = event.values[2]
+                            // Magnitud total incluyendo gravedad (9.8 m/s²)
+                            val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble()).toFloat()
+                            val dynamicJerk = Math.abs(magnitude - 9.8f)
+
+                            // Calibración estilo Google Theft Detection Lock:
+                            // Arrebato violento de mano / tironazo: magnitud > 21.0 m/s² (~2.14G)
+                            // o jerk dinámico > 11.5 m/s²
+                            if (magnitude > 21.0f || dynamicJerk > 11.5f) {
+                                lastTheftTriggerTime = now
+                                onTheftSnatchDetected(
+                                    "sensor_antirrobo_acelerometro",
+                                    "Arrebato brusco detectado (Aceleración: ${String.format(Locale.US, "%.1f", magnitude)} m/s²)"
+                                )
+                            }
+                        }
+                        Sensor.TYPE_GYROSCOPE -> {
+                            val rx = event.values[0]
+                            val ry = event.values[1]
+                            val rz = event.values[2]
+                            // Velocidad angular total
+                            val rotMagnitude = Math.sqrt((rx * rx + ry * ry + rz * rz).toDouble()).toFloat()
+
+                            // Forcejeo brusco o giro violento al arrebatar el teléfono (> 5.5 rad/s, aprox 315°/s)
+                            if (rotMagnitude > 5.5f) {
+                                lastTheftTriggerTime = now
+                                onTheftSnatchDetected(
+                                    "sensor_antirrobo_giroscopio",
+                                    "Forcejeo violento detectado (Rotación: ${String.format(Locale.US, "%.1f", rotMagnitude)} rad/s)"
+                                )
                             }
                         }
                     }
-
-                    override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
                 }
-                sensorManager?.registerListener(
-                    sensorEventListener,
-                    accelerometer,
-                    SensorManager.SENSOR_DELAY_UI
-                )
+
+                override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+            }
+
+            accelerometer?.let {
+                sensorManager?.registerListener(sensorEventListener, it, SensorManager.SENSOR_DELAY_UI)
+            }
+            gyroscope?.let {
+                sensorManager?.registerListener(sensorEventListener, it, SensorManager.SENSOR_DELAY_UI)
             }
         } catch (_: Exception) {}
     }
@@ -291,17 +344,26 @@ class EmergencyForegroundService : Service() {
         } catch (_: Exception) {}
         sensorEventListener = null
         sensorManager = null
+        accelerometer = null
+        gyroscope = null
     }
 
     private fun onTriplePowerPressDetected() {
-        startEmergencyFlow("power_button_3x", "ROBO", "Se detectaron 3 pulsaciones del botón de encendido")
+        if (isEmergencyActive) return
+        startEmergencyFlow("power_button_3x", "ROBO", "Se detectaron 3 pulsaciones rápidas del botón de encendido")
     }
 
-    private fun onAccidentDetected(magnitude: Float) {
-        startEmergencyFlow("sensor_impacto", "ACCIDENTE", "Impacto fuerte detectado: ${String.format(Locale.US, "%.1f", magnitude)} m/s²")
+    private fun onTheftSnatchDetected(source: String, detailInfo: String) {
+        if (isEmergencyActive) return
+        startEmergencyFlow(source, "ROBO", detailInfo)
     }
 
     private fun startEmergencyFlow(source: String, alertType: String, detailInfo: String) {
+        // Si ya hay una emergencia en curso y no ha sido cancelada, ignorar disparos adicionales de pánico
+        if (isEmergencyActive && !isEmergencyDispatched) {
+            return
+        }
+
         isEmergencyActive = true
         currentEmergencySource = source
         currentEmergencyAlertType = alertType
@@ -367,12 +429,12 @@ class EmergencyForegroundService : Service() {
             }
         } catch (_: Exception) {}
 
-        // 5. Iniciar la notificación con cuenta regresiva
-        updateEmergencyNotificationCountdown(5, alertType, fullScreenPendingIntent)
+        // 5. Iniciar la notificación con cuenta regresiva rápida (3 segundos)
+        updateEmergencyNotificationCountdown(3, alertType, fullScreenPendingIntent)
 
-        // 6. Iniciar temporizador nativo de 5 segundos
+        // 6. Iniciar temporizador nativo de 3 segundos
         activeCountdownTimer?.cancel()
-        activeCountdownTimer = object : CountDownTimer(5000, 1000) {
+        activeCountdownTimer = object : CountDownTimer(3000, 1000) {
             override fun onTick(millisUntilFinished: Long) {
                 val seconds = (millisUntilFinished / 1000) + 1
                 if (isEmergencyActive && !isEmergencyDispatched) {
@@ -460,10 +522,13 @@ class EmergencyForegroundService : Service() {
                 } else {
                     "🚨 ¡AUXILIO! ME ESTÁN ROBANDO 🚨"
                 }
-                val triggerLabel = if (source == "power_button_3x") {
-                    "BOTÓN DE ENCENDIDO (3X) [MODO BOLSILLO / APP CERRADA]"
-                } else {
-                    "IMPACTO / ACCIDENTE (FONDO)"
+                val triggerLabel = when (source) {
+                    "power_button_3x" -> "BOTÓN DE ENCENDIDO (3X RÁPIDO) [MODO BOLSILLO / APP CERRADA]"
+                    "sensor_antirrobo_acelerometro" -> "SENSOR ANTIRROBO (ARREBATO BRUSCO / ACELERÓMETRO)"
+                    "sensor_antirrobo_giroscopio" -> "SENSOR ANTIRROBO (FORCEJEO BRUSCO / GIROSCOPIO)"
+                    "sensor_antirrobo" -> "SENSOR ANTIRROBO (DETECCIÓN DE ROBO EN SEGUNDO PLANO)"
+                    "physical_button_3x" -> "BOTÓN FÍSICO RÁPIDO (3X) [DESESPERACIÓN / ROBO]"
+                    else -> "DETECCIÓN AUTOMÁTICA DE ROBO (FONDO)"
                 }
                 val latStr = String.format(Locale.US, "%.5f", lat)
                 val lonStr = String.format(Locale.US, "%.5f", lon)

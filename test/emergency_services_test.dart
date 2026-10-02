@@ -53,9 +53,9 @@ void main() {
         },
       );
 
-      sensor.simulateImpactTrigger();
-      expect(triggeredReason, contains('Impacto'));
-      expect(triggeredSource, 'sensor_simulado');
+      sensor.simulateTheftSnatchTrigger();
+      expect(triggeredReason, contains('Antirrobo'));
+      expect(triggeredSource, 'sensor_simulado_robo');
       sensor.stopMonitoring();
     });
   });
@@ -67,8 +67,8 @@ void main() {
     });
 
     test('verifySecretPin validates default PIN and custom PIN', () async {
-      // Default fallback PIN is 1234
-      final defaultValid = await SessionService.verifySecretPin('1234');
+      // Default fallback PIN is 7462 (primeros 4 dígitos de DNI 74629337)
+      final defaultValid = await SessionService.verifySecretPin('7462');
       expect(defaultValid, isTrue);
 
       final wrongPin = await SessionService.verifySecretPin('9999');

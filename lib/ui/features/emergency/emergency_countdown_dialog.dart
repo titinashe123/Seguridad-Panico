@@ -53,7 +53,7 @@ class EmergencyCountdownDialog extends StatefulWidget {
 
 class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
     with SingleTickerProviderStateMixin {
-  int _secondsLeft = 5;
+  int _secondsLeft = 3;
   Timer? _timer;
   final _pinController = TextEditingController();
   late AnimationController _pulseController;

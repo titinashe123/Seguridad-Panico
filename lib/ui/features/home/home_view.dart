@@ -47,14 +47,14 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
   }
 
   void _initHardwareAndSensors() {
-    // 1. Iniciar monitoreo continuo de Acelerómetro y Giroscopio
+    // 1. Iniciar monitoreo continuo de sensores antirrobo (Acelerómetro y Giroscopio)
     _sensorService.startMonitoring(
       onTriggered: (reason, source) {
         if (!mounted) return;
         EmergencyCountdownDialog.show(
           context,
-          alertType: 'ACCIDENTE',
-          source: 'SENSOR: $reason',
+          alertType: 'ROBO',
+          source: 'ANTIRROBO: $reason',
           isDirectWhatsAppApi: true,
         );
       },
@@ -65,7 +65,9 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
       onTriggered: (source, [alertType]) {
         if (!mounted) return;
         final type = alertType ?? 'ROBO';
-        final label = type == 'ACCIDENTE' ? 'IMPACTO / ACCIDENTE (FONDO)' : 'BOTÓN DE ENCENDIDO (3X)';
+        final label = source.contains('sensor')
+            ? 'SENSOR ANTIRROBO (ARREBATO / FORCEJEO)'
+            : 'BOTÓN DE ENCENDIDO (3X)';
         EmergencyCountdownDialog.show(
           context,
           alertType: type,
@@ -84,7 +86,7 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
           final position = await GpsLocationService.getCurrentLocation();
           dispatchedAlertId = await WhatsAppApiService.sendAutomatedEmergencyAlert(
             category: alertType,
-            source: source == 'power_button_3x' ? 'BOTÓN DE ENCENDIDO (3X)' : 'IMPACTO / ACCIDENTE (FONDO)',
+            source: source == 'power_button_3x' ? 'BOTÓN DE ENCENDIDO (3X)' : 'SENSOR ANTIRROBO (ARREBATO / FORCEJEO)',
             lat: position?.latitude ?? -13.71450,
             lon: position?.longitude ?? -76.20320,
             address: position != null ? 'Ubicación móvil GPS (Pisco)' : 'Pisco, Ica - Ubicación móvil',
