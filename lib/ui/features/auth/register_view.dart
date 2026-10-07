@@ -114,21 +114,14 @@ class _RegisterViewState extends State<RegisterView> {
 
       final identity = lookupResult.identity!;
 
-      // 3. Validación de Dígito Verificador (DV) con RENIEC / Módulo 11
-      final dvMatches = ReniecService.matchesVerificationDigit(
-        dni: dni,
-        userDv: dv,
-        apiDv: identity.dv,
-      );
-
-      // 4. Validación de Nombres y Apellidos con RENIEC
+      // 3. Validación de Nombres y Apellidos con RENIEC
       final identityMatches = ReniecService.matchesIdentity(
         identity: identity,
         nombres: firstName,
         apellidos: lastName,
       );
 
-      if (!dvMatches || !identityMatches) {
+      if (!identityMatches) {
         setState(() => _isLoading = false);
         // Mensaje genérico de seguridad sin revelar qué campo falló
         _showError('Por favor, ingrese sus datos correctamente.');
