@@ -1,8 +1,13 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/services/app_lock_service.dart';
 import '../../../data/services/auth_service.dart';
+import '../../../data/services/dni_pdf417_service.dart';
+import '../../../data/services/reniec_service.dart';
 import '../navigation/main_layout_view.dart';
 
 class RegisterView extends StatefulWidget {
@@ -10,6 +15,19 @@ class RegisterView extends StatefulWidget {
 
   @override
   State<RegisterView> createState() => _RegisterViewState();
+}
+
+/// Estado de la validación de identidad RENIEC en el formulario.
+enum _ReniecUiState {
+  idle,
+  loading,
+  waitingNames,
+  verified,
+  mismatch,
+  invalidFormat,
+  notFound,
+  networkError,
+  serviceError,
 }
 
 class _RegisterViewState extends State<RegisterView> {
@@ -27,8 +45,17 @@ class _RegisterViewState extends State<RegisterView> {
   bool _acceptTerms = true;
   bool _isLoading = false;
 
+  // Validación RENIEC (HU-IDENTIDAD-01)
+  Timer? _dniDebounce;
+  _ReniecUiState _reniecState = _ReniecUiState.idle;
+  ReniecIdentity? _reniecIdentity;
+  String _reniecMessage = '';
+
+  bool get _identityVerified => _reniecState == _ReniecUiState.verified;
+
   @override
   void dispose() {
+    _dniDebounce?.cancel();
     _dniController.dispose();
     _dvController.dispose();
     _firstNameController.dispose();
@@ -38,6 +65,144 @@ class _RegisterViewState extends State<RegisterView> {
     _confirmPasswordController.dispose();
     _pinController.dispose();
     super.dispose();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Validación de identidad RENIEC
+  // ---------------------------------------------------------------------------
+
+  /// Disparado al escribir en el campo DNI: debounce de 700 ms y consulta
+  /// automática cuando se completan los 8 dígitos (tiempo real).
+  void _onDniChanged(String value) {
+    final digits = value.replaceAll(RegExp(r'\D'), '');
+    if (digits != value) {
+      _dniController.value = TextEditingValue(
+        text: digits,
+        selection: TextSelection.collapsed(offset: digits.length),
+      );
+    }
+
+    _dniDebounce?.cancel();
+    setState(() {
+      _reniecState = _ReniecUiState.idle;
+      _reniecMessage = '';
+      _reniecIdentity = null;
+    });
+
+    if (digits.length != 8) return;
+
+    _dniDebounce = Timer(const Duration(milliseconds: 700), _consultReniec);
+  }
+
+  /// Consulta la identidad oficial y contrasta/aplica los datos.
+  Future<void> _consultReniec() async {
+    final dni = _dniController.text.trim();
+
+    if (!ReniecService.isValidDniFormat(dni)) {
+      setState(() {
+        _reniecState = _ReniecUiState.invalidFormat;
+        _reniecMessage = 'DNI inválido: debe contener exactamente 8 dígitos.';
+      });
+      return;
+    }
+
+    setState(() {
+      _reniecState = _ReniecUiState.loading;
+      _reniecMessage = 'Consultando RENIEC...';
+    });
+
+    final result = await ReniecService.lookup(dni);
+    if (!mounted) return;
+
+    if (!result.isSuccess || result.identity == null) {
+      setState(() {
+        _reniecState = _mapLookupError(result.status);
+        _reniecMessage = result.message.isNotEmpty
+            ? result.message
+            : 'No se pudo validar el DNI con RENIEC.';
+        _reniecIdentity = null;
+      });
+      return;
+    }
+
+    final identity = result.identity!;
+
+    // Validación ciega: los datos de RENIEC se guardan SÓLO en memoria para
+    // contrastarlos. NUNCA se autocompletan NOMBRES/APELLIDOS (privacidad).
+    setState(() {
+      _reniecIdentity = identity;
+      if (identity.dv != null &&
+          identity.dv!.isNotEmpty &&
+          _dvController.text.trim().isEmpty) {
+        _dvController.text = identity.dv!;
+      }
+    });
+
+    _revalidateNames();
+  }
+
+  _ReniecUiState _mapLookupError(ReniecLookupStatus status) {
+    switch (status) {
+      case ReniecLookupStatus.invalidFormat:
+        return _ReniecUiState.invalidFormat;
+      case ReniecLookupStatus.notFound:
+        return _ReniecUiState.notFound;
+      case ReniecLookupStatus.networkError:
+        return _ReniecUiState.networkError;
+      default:
+        return _ReniecUiState.serviceError;
+    }
+  }
+
+  /// Contraste estricto de NOMBRES/APELLIDOS contra la identidad oficial
+  /// (se ejecuta en tiempo real al editar los campos). Los datos de RENIEC
+  /// se comparan de forma ciega: no se muestran ni se copian al formulario.
+  void _revalidateNames() {
+    final identity = _reniecIdentity;
+    if (identity == null) return;
+
+    final nombres = _firstNameController.text;
+    final apellidos = _lastNameController.text;
+
+    // Identidad consultada, a la espera de que el ciudadano escriba sus datos
+    if (nombres.isEmpty || apellidos.isEmpty) {
+      setState(() {
+        _reniecState = _ReniecUiState.waitingNames;
+        _reniecMessage =
+            'DNI consultado. Escribe tus nombres y apellidos tal como figuran en RENIEC.';
+      });
+      return;
+    }
+
+    final matches = ReniecService.matchesIdentity(
+      identity: identity,
+      nombres: nombres,
+      apellidos: apellidos,
+    );
+
+    setState(() {
+      _reniecState = matches ? _ReniecUiState.verified : _ReniecUiState.mismatch;
+      _reniecMessage = matches
+          ? 'Identidad verificada con RENIEC.'
+          : 'Los datos no coinciden con los registros del DNI.';
+    });
+  }
+
+  /// Hook para el futuro escáner PDF417 del reverso del DNI:
+  /// payload decodificado -> autocompletado -> consulta RENIEC.
+  // ignore: unused_element
+  void _onDniBarcodeScanned(String payload) {
+    final data = DniPdf417Service.tryParse(payload);
+    if (data == null || !data.hasIdentity) {
+      _showError('No se pudo leer el código del DNI. Intente nuevamente.');
+      return;
+    }
+    setState(() {
+      _dniController.text = data.numeroDocumento ?? '';
+      _firstNameController.text = data.nombres ?? '';
+      _lastNameController.text = data.apellidos ?? '';
+    });
+    _consultReniec();
   }
 
   void _onRegister() async {
@@ -51,8 +216,21 @@ class _RegisterViewState extends State<RegisterView> {
     final confirmPassword = _confirmPasswordController.text.trim();
     final pin = _pinController.text.trim();
 
-    if (dni.isEmpty || dni.length < 8) {
-      _showError('Ingrese un número de DNI válido (mínimo 8 dígitos).');
+    if (dni.isEmpty || !ReniecService.isValidDniFormat(dni)) {
+      _showError('Ingrese un número de DNI válido (8 dígitos).');
+      return;
+    }
+    // Bloqueo de registro sin validación RENIEC o con datos discrepantes
+    if (!_identityVerified) {
+      if (_reniecState == _ReniecUiState.mismatch) {
+        _showError('Los datos no coinciden con los registros del DNI.');
+      } else if (_reniecState == _ReniecUiState.waitingNames) {
+        _showError(
+            'Escribe tus nombres y apellidos tal como figuran en RENIEC.');
+      } else {
+        _showError(
+            'Valida tu identidad: consulta tu DNI en RENIEC antes de continuar.');
+      }
       return;
     }
     if (firstName.isEmpty) {
@@ -304,7 +482,7 @@ class _RegisterViewState extends State<RegisterView> {
     );
   }
 
-  void _showError(String message) {
+  void _showError(String message, {bool isSuccess = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(
@@ -315,9 +493,129 @@ class _RegisterViewState extends State<RegisterView> {
             fontSize: 13,
           ),
         ),
-        backgroundColor: AppColors.error,
+        backgroundColor: isSuccess ? AppColors.accentGreen : AppColors.error,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      ),
+    );
+  }
+
+  /// Icono de estado dentro del campo DNI (carga / verificado / error)
+  Widget _buildDniSuffixIcon() {
+    switch (_reniecState) {
+      case _ReniecUiState.loading:
+        return const Padding(
+          padding: EdgeInsets.only(right: 12),
+          child: SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: AppColors.accentBlue,
+            ),
+          ),
+        );
+      case _ReniecUiState.verified:
+      case _ReniecUiState.waitingNames:
+        return const Padding(
+          padding: EdgeInsets.only(right: 12),
+          child: Icon(Icons.verified_user_rounded,
+              color: AppColors.accentGreen, size: 18),
+        );
+      case _ReniecUiState.idle:
+        return const SizedBox.shrink();
+      default:
+        return const Padding(
+          padding: EdgeInsets.only(right: 12),
+          child: Icon(Icons.error_outline_rounded,
+              color: AppColors.error, size: 18),
+        );
+    }
+  }
+
+  /// Mensaje de estado de la validación RENIEC bajo el campo DNI.
+  Widget _buildReniecStatus() {
+    if (_reniecState == _ReniecUiState.idle) return const SizedBox.shrink();
+
+    late final Color color;
+    late final IconData icon;
+    late final String text;
+
+    switch (_reniecState) {
+      case _ReniecUiState.loading:
+        color = AppColors.accentBlue;
+        icon = Icons.sync_rounded;
+        text = _reniecMessage;
+        break;
+      case _ReniecUiState.waitingNames:
+        color = AppColors.accentBlue;
+        icon = Icons.edit_note_rounded;
+        text = _reniecMessage;
+        break;
+      case _ReniecUiState.verified:
+        color = AppColors.accentGreen;
+        icon = Icons.verified_user_rounded;
+        text = 'Identidad verificada con RENIEC.';
+        break;
+      case _ReniecUiState.mismatch:
+        color = AppColors.error;
+        icon = Icons.gpp_bad_rounded;
+        text = 'Los datos no coinciden con los registros del DNI.';
+        break;
+      case _ReniecUiState.invalidFormat:
+        color = AppColors.error;
+        icon = Icons.badge_rounded;
+        text = 'DNI inválido: debe contener exactamente 8 dígitos.';
+        break;
+      case _ReniecUiState.notFound:
+        color = AppColors.error;
+        icon = Icons.search_off_rounded;
+        text = 'El DNI no existe en los registros de RENIEC.';
+        break;
+      case _ReniecUiState.networkError:
+        color = AppColors.accentOrange;
+        icon = Icons.wifi_off_rounded;
+        text = _reniecMessage;
+        break;
+      case _ReniecUiState.serviceError:
+        color = AppColors.accentOrange;
+        icon = Icons.cloud_off_rounded;
+        text = _reniecMessage;
+        break;
+      case _ReniecUiState.idle:
+        return const SizedBox.shrink();
+    }
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8.0),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_reniecState == _ReniecUiState.loading)
+            const Padding(
+              padding: EdgeInsets.only(top: 1),
+              child: SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                    strokeWidth: 1.6, color: AppColors.accentBlue),
+              ),
+            )
+          else
+            Icon(icon, size: 14, color: color),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              text,
+              style: GoogleFonts.inter(
+                fontSize: 11,
+                fontWeight: FontWeight.w600,
+                color: color,
+                height: 1.3,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -454,13 +752,75 @@ class _RegisterViewState extends State<RegisterView> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              _buildFieldLabel('DNI *'),
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: [
+                                  _buildFieldLabel('DNI *'),
+                                  Row(
+                                    children: [
+                                      // Hook del futuro escáner PDF417 (reverso del DNI)
+                                      TextButton(
+                                        onPressed: () => _showError(
+                                            'Escáner PDF417 pendiente de integrar: ver DniPdf417Service.',
+                                            isSuccess: true),
+                                        style: TextButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6),
+                                          minimumSize: Size.zero,
+                                          tapTargetSize:
+                                              MaterialTapTargetSize.shrinkWrap,
+                                        ),
+                                        child: Text(
+                                          'ESCANEAR',
+                                          style: GoogleFonts.chakraPetch(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w700,
+                                            letterSpacing: 0.8,
+                                            color: AppColors.textMuted,
+                                          ),
+                                        ),
+                                      ),
+                                      TextButton(
+                                        onPressed: _reniecState ==
+                                                _ReniecUiState.loading
+                                            ? null
+                                            : _consultReniec,
+                                        style: TextButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 6),
+                                          minimumSize: Size.zero,
+                                          tapTargetSize:
+                                              MaterialTapTargetSize.shrinkWrap,
+                                        ),
+                                        child: Text(
+                                          'CONSULTAR RENIEC',
+                                          style: GoogleFonts.chakraPetch(
+                                            fontSize: 10,
+                                            fontWeight: FontWeight.w700,
+                                            letterSpacing: 0.8,
+                                            color: AppColors.accentBlue,
+                                          ),
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
                               TextField(
                                 controller: _dniController,
                                 keyboardType: TextInputType.number,
-                                style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
-                                decoration: const InputDecoration(
+                                maxLength: 8,
+                                inputFormatters: [
+                                  FilteringTextInputFormatter.digitsOnly,
+                                  LengthLimitingTextInputFormatter(8),
+                                ],
+                                onChanged: _onDniChanged,
+                                style: const TextStyle(
+                                    fontSize: 14, color: AppColors.textPrimary),
+                                decoration: InputDecoration(
                                   hintText: '8 dígitos',
+                                  counterText: '',
+                                  suffixIcon: _buildDniSuffixIcon(),
                                 ),
                               ),
                             ],
@@ -477,7 +837,8 @@ class _RegisterViewState extends State<RegisterView> {
                                 controller: _dvController,
                                 keyboardType: TextInputType.number,
                                 textAlign: TextAlign.center,
-                                style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
+                                style: const TextStyle(
+                                    fontSize: 14, color: AppColors.textPrimary),
                                 decoration: const InputDecoration(
                                   hintText: '0',
                                 ),
@@ -488,16 +849,25 @@ class _RegisterViewState extends State<RegisterView> {
                       ],
                     ),
 
+                    // Estado de la validación RENIEC en tiempo real
+                    _buildReniecStatus(),
+
                     const SizedBox(height: 18),
 
-                    // Nombres
+                    // Nombres (el ciudadano escribe manualmente; se contrasta
+                    // de forma estricta y ciega contra RENIEC)
                     _buildFieldLabel('NOMBRES *'),
                     TextField(
                       controller: _firstNameController,
-                      textCapitalization: TextCapitalization.words,
-                      style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
-                      decoration: const InputDecoration(
-                        hintText: 'Ej. Juan Carlos',
+                      textCapitalization: TextCapitalization.characters,
+                      onChanged: (_) => _revalidateNames(),
+                      style: const TextStyle(
+                          fontSize: 14, color: AppColors.textPrimary),
+                      decoration: InputDecoration(
+                        hintText: 'Ej. JUAN CARLOS',
+                        errorText: _reniecState == _ReniecUiState.mismatch
+                            ? 'Los datos no coinciden con los registros del DNI'
+                            : null,
                       ),
                     ),
 
@@ -507,10 +877,15 @@ class _RegisterViewState extends State<RegisterView> {
                     _buildFieldLabel('APELLIDOS *'),
                     TextField(
                       controller: _lastNameController,
-                      textCapitalization: TextCapitalization.words,
-                      style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
-                      decoration: const InputDecoration(
-                        hintText: 'Ej. Pérez Mendoza',
+                      textCapitalization: TextCapitalization.characters,
+                      onChanged: (_) => _revalidateNames(),
+                      style: const TextStyle(
+                          fontSize: 14, color: AppColors.textPrimary),
+                      decoration: InputDecoration(
+                        hintText: 'Ej. PÉREZ MENDOZA',
+                        errorText: _reniecState == _ReniecUiState.mismatch
+                            ? 'Los datos no coinciden con los registros del DNI'
+                            : null,
                       ),
                     ),
 
@@ -665,11 +1040,14 @@ class _RegisterViewState extends State<RegisterView> {
 
                     const SizedBox(height: 26),
 
-                    // Register Button
+                    // Register Button (habilitado sólo con identidad verificada)
                     ElevatedButton(
-                      onPressed: _onRegister,
+                      onPressed:
+                          (_isLoading || !_identityVerified) ? null : _onRegister,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: AppColors.primaryRed,
+                        disabledBackgroundColor: AppColors.surfaceElevated,
+                        disabledForegroundColor: AppColors.textDisabled,
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         shape: RoundedRectangleBorder(
                           borderRadius: BorderRadius.circular(10),
