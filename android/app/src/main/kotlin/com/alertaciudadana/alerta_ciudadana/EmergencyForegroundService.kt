@@ -34,23 +34,32 @@ import java.util.TimeZone
 
 class EmergencyForegroundService : Service() {
 
-    private var lastScreenTransitionState: Boolean? = null
-    private var lastScreenTransitionTime: Long = 0
-    private var rapidPressCount: Int = 0
+    private var lastScreenAction: String? = null
+    private var lastScreenActionTime: Long = 0
+    private val powerPressTimestamps = ArrayList<Long>()
     private var screenReceiver: BroadcastReceiver? = null
     private var isLiveTrackingActive: Boolean = false
 
     private var sensorManager: SensorManager? = null
-    private var accelerometer: Sensor? = null
+    private var linearAccelerometer: Sensor? = null
+    private var rawAccelerometer: Sensor? = null
     private var gyroscope: Sensor? = null
     private var sensorEventListener: SensorEventListener? = null
     private var lastTheftTriggerTime: Long = 0
     private var lastButtonTriggerTime: Long = 0
 
-    private var consecutiveSnatchCount = 0
-    private var lastSnatchSampleTime: Long = 0
-    private var consecutiveGyroCount = 0
-    private var lastGyroSampleTime: Long = 0
+    // Verificación de Fuga en 2 Fases (Estándar Google Theft Detection & Descarte de Reposo/Cama)
+    private var isVerifyingTheftEscape: Boolean = false
+    private var candidateSnatchTime: Long = 0
+    private var candidateSnatchSource: String = ""
+    private var candidateSnatchDetail: String = ""
+    private var tailMotionSamples: Int = 0
+    private var tailStillSamples: Int = 0
+    private var lastActiveMotionTimestamp: Long = 0
+    private var candidateStartLocation: Location? = null
+    private var escapeVerificationHandler: android.os.Handler? = null
+    private var lastCurrentLinearMag: Float = 0f
+    private var lastCurrentGyroMag: Float = 0f
 
     companion object {
         const val CHANNEL_ID = "alerta_ciudadana_protection_channel"
@@ -72,7 +81,17 @@ class EmergencyForegroundService : Service() {
         var emergencyTriggerTimestamp: Long = 0
         var isEmergencyDispatched: Boolean = false
 
+        fun isUserLoggedIn(context: Context): Boolean {
+            return try {
+                val prefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                prefs.getBoolean("flutter.app_session_is_logged_in", false)
+            } catch (_: Exception) {
+                false
+            }
+        }
+
         fun startService(context: Context) {
+            if (!isUserLoggedIn(context)) return
             val intent = Intent(context, EmergencyForegroundService::class.java).apply {
                 action = ACTION_START_GUARD
             }
@@ -106,6 +125,7 @@ class EmergencyForegroundService : Service() {
                 prefs.edit()
                     .putBoolean("flutter.pending_emergency_active", false)
                     .putBoolean("flutter.pending_emergency_dispatched", false)
+                    .putBoolean("flutter.native_dispatched_success", false)
                     .apply()
             } catch (_: Exception) {}
 
@@ -124,6 +144,10 @@ class EmergencyForegroundService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        if (!isUserLoggedIn(this)) {
+            stopSelf()
+            return
+        }
         isServiceRunning = true
         createNotificationChannels()
         registerScreenReceiver()
@@ -131,6 +155,12 @@ class EmergencyForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!isUserLoggedIn(this)) {
+            stopForeground(true)
+            stopSelf()
+            return START_NOT_STICKY
+        }
+
         when (intent?.action) {
             ACTION_STOP_GUARD -> {
                 stopForeground(true)
@@ -241,47 +271,46 @@ class EmergencyForegroundService : Service() {
 
         screenReceiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
-                val now = System.currentTimeMillis()
+                // Si el usuario no ha iniciado sesión, ignorar completamente cualquier pulsación
+                if (!isUserLoggedIn(this@EmergencyForegroundService)) {
+                    powerPressTimestamps.clear()
+                    lastScreenAction = null
+                    return
+                }
 
                 // Si ya está activa la emergencia o en cuenta regresiva, NO reiniciar ni alterar
                 if (isEmergencyActive) {
                     return
                 }
 
-                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
-                val isInteractive = powerManager?.isInteractive ?: (intent?.action == Intent.ACTION_SCREEN_ON)
+                val action = intent?.action ?: return
+                val now = System.currentTimeMillis()
 
-                // 1. Descartar eventos duplicados que no representen un cambio de estado real
-                // (evita que Always On Display (AOD), ambient display o rebotes del driver sumen eventos)
-                if (lastScreenTransitionState != null && lastScreenTransitionState == isInteractive) {
+                // 1. Descartar eventos duplicados de la misma acción
+                // (evita que Always On Display, ambient display o rebotes del sistema sumen pulsaciones falsas)
+                if (action == lastScreenAction) {
                     return
                 }
 
-                // 2. Debounce mínimo: un humano no puede pulsar físicamente el botón en menos de 160ms
-                val timeSinceLast = now - lastScreenTransitionTime
-                if (timeSinceLast < 160) {
+                // 2. Debounce optimizado de 40ms (anteriormente 100ms descartaba clics rápidos sucesivos)
+                if (now - lastScreenActionTime < 40) {
                     return
                 }
 
-                // 3. Caducidad: Si pasó más de 1000ms (1 segundo) desde la última pulsación,
-                // no es una ráfaga rápida de 3 clics por pánico/desesperación. Se reinicia el conteo a 1.
-                if (timeSinceLast > 1000) {
-                    rapidPressCount = 1
-                } else {
-                    rapidPressCount++
-                }
+                lastScreenAction = action
+                lastScreenActionTime = now
 
-                lastScreenTransitionTime = now
-                lastScreenTransitionState = isInteractive
+                // 3. Ventana deslizante de 3500ms para admitir pulsaciones rápidas con margen para la respuesta de pantalla
+                powerPressTimestamps.removeAll { now - it > 3500 }
+                powerPressTimestamps.add(now)
 
-                // 4. REGLA ESTRICTA: Solo dispara cuando se completan exactamente al menos 3 pulsaciones rápidas consecutivas
-                if (rapidPressCount >= 3) {
-                    rapidPressCount = 0
-                    lastScreenTransitionState = null
-                    if (now - lastButtonTriggerTime > 3500) {
-                        lastButtonTriggerTime = now
-                        onTriplePowerPressDetected()
-                    }
+                // 4. Disparo inmediato al completar 3 pulsaciones consecutivas
+                if (powerPressTimestamps.size >= 3) {
+                    powerPressTimestamps.clear()
+                    lastScreenAction = null
+                    lastButtonTriggerTime = now
+                    android.util.Log.i("EmergencyService", "⚡ DISPARO INSTANTÁNEO BOTÓN DE ENCENDIDO (3X)")
+                    onTriplePowerPressDetected()
                 }
             }
         }
@@ -290,15 +319,21 @@ class EmergencyForegroundService : Service() {
     }
 
     private fun registerSensorListener() {
+        if (!isUserLoggedIn(this)) return
         if (sensorManager != null) return
         try {
             sensorManager = getSystemService(Context.SENSOR_SERVICE) as? SensorManager
-            accelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            // Sensor lineal (excluye gravedad estática de 9.8 m/s²), idéntico al estándar de Theft Detection Lock
+            linearAccelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_LINEAR_ACCELERATION)
+            if (linearAccelerometer == null) {
+                rawAccelerometer = sensorManager?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+            }
             gyroscope = sensorManager?.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
 
             sensorEventListener = object : SensorEventListener {
                 override fun onSensorChanged(event: SensorEvent?) {
                     if (event == null) return
+                    if (!isUserLoggedIn(this@EmergencyForegroundService)) return
                     val now = System.currentTimeMillis()
 
                     // Debounce de 8 segundos y no re-disparar si ya hay una emergencia activa
@@ -306,76 +341,128 @@ class EmergencyForegroundService : Service() {
                         return
                     }
 
+                    val x = event.values[0]
+                    val y = event.values[1]
+                    val z = event.values[2]
+                    val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble()).toFloat()
+
+                    // Actualizar memoria sensorial continua para fusión de sensores
                     when (event.sensor.type) {
+                        Sensor.TYPE_LINEAR_ACCELERATION -> lastCurrentLinearMag = magnitude
+                        Sensor.TYPE_ACCELEROMETER -> lastCurrentLinearMag = Math.abs(magnitude - 9.8f)
+                        Sensor.TYPE_GYROSCOPE -> lastCurrentGyroMag = magnitude
+                    }
+
+                    // FASE 2: Si estamos dentro de la ventana de verificación de fuga (2200 ms posteriores al jalón)
+                    if (isVerifyingTheftEscape) {
+                        val isMotionActive = when (event.sensor.type) {
+                            Sensor.TYPE_LINEAR_ACCELERATION -> magnitude > 2.8f
+                            Sensor.TYPE_ACCELEROMETER -> Math.abs(magnitude - 9.8f) > 2.8f
+                            Sensor.TYPE_GYROSCOPE -> magnitude > 1.2f
+                            else -> false
+                        }
+
+                        val elapsedSinceSnatch = now - candidateSnatchTime
+                        val isTailWindow = elapsedSinceSnatch >= 900L
+
+                        if (isMotionActive) {
+                            lastActiveMotionTimestamp = now
+                            if (isTailWindow) {
+                                tailMotionSamples++
+                            }
+                        } else {
+                            val isStill = when (event.sensor.type) {
+                                Sensor.TYPE_LINEAR_ACCELERATION -> magnitude < 1.2f
+                                Sensor.TYPE_ACCELEROMETER -> Math.abs(magnitude - 9.8f) < 1.2f
+                                Sensor.TYPE_GYROSCOPE -> magnitude < 0.5f
+                                else -> false
+                            }
+                            if (isStill && isTailWindow) {
+                                tailStillSamples++
+                            }
+                        }
+                        return
+                    }
+
+                    // FASE 1: Detección del Jalón de Arrebato Inicial (Candidate Snatch)
+                    var isCandidate = false
+                    var sourceCandidate = ""
+                    var detailCandidate = ""
+
+                    when (event.sensor.type) {
+                        Sensor.TYPE_LINEAR_ACCELERATION -> {
+                            if (magnitude >= 30.0f) {
+                                isCandidate = true
+                                sourceCandidate = "sensor_antirrobo_acelerometro"
+                                detailCandidate = "Arrebato violento detectado (Aceleración lineal: ${String.format(Locale.US, "%.1f", magnitude)} m/s²)"
+                            } else if (magnitude >= 22.0f && lastCurrentGyroMag >= 12.0f) {
+                                isCandidate = true
+                                sourceCandidate = "sensor_antirrobo_fusion"
+                                detailCandidate = "Arrebato con forcejeo detectado (Aceleración: ${String.format(Locale.US, "%.1f", magnitude)} m/s², Giro: ${String.format(Locale.US, "%.1f", lastCurrentGyroMag)} rad/s)"
+                            }
+                        }
                         Sensor.TYPE_ACCELEROMETER -> {
-                            val x = event.values[0]
-                            val y = event.values[1]
-                            val z = event.values[2]
-                            // Magnitud total incluyendo gravedad (9.8 m/s²)
-                            val magnitude = Math.sqrt((x * x + y * y + z * z).toDouble()).toFloat()
-
-                            // Umbral de arrebato violento de celular (> 38.0 m/s², aprox 3.9G):
-                            // Requiere tirón real de alta energía y confirmación en 2 lecturas consecutivas para descartar golpes o vibraciones
-                            if (magnitude > 38.0f) {
-                                if (now - lastSnatchSampleTime < 400) {
-                                    consecutiveSnatchCount++
-                                } else {
-                                    consecutiveSnatchCount = 1
-                                }
-                                lastSnatchSampleTime = now
-
-                                if (consecutiveSnatchCount >= 2 || magnitude > 48.0f) {
-                                    consecutiveSnatchCount = 0
-                                    lastTheftTriggerTime = now
-                                    onTheftSnatchDetected(
-                                        "sensor_antirrobo_acelerometro",
-                                        "Arrebato violento detectado (Aceleración: ${String.format(Locale.US, "%.1f", magnitude)} m/s²)"
-                                    )
-                                }
-                            } else {
-                                if (now - lastSnatchSampleTime > 400) {
-                                    consecutiveSnatchCount = 0
-                                }
+                            if (magnitude >= 45.0f) {
+                                isCandidate = true
+                                sourceCandidate = "sensor_antirrobo_acelerometro"
+                                detailCandidate = "Arrebato violento detectado (Aceleración total: ${String.format(Locale.US, "%.1f", magnitude)} m/s²)"
+                            } else if (magnitude >= 35.0f && lastCurrentGyroMag >= 12.0f) {
+                                isCandidate = true
+                                sourceCandidate = "sensor_antirrobo_fusion"
+                                detailCandidate = "Arrebato con forcejeo detectado (Aceleración: ${String.format(Locale.US, "%.1f", magnitude)} m/s², Giro: ${String.format(Locale.US, "%.1f", lastCurrentGyroMag)} rad/s)"
                             }
                         }
                         Sensor.TYPE_GYROSCOPE -> {
-                            val rx = event.values[0]
-                            val ry = event.values[1]
-                            val rz = event.values[2]
-                            // Velocidad angular total
-                            val rotMagnitude = Math.sqrt((rx * rx + ry * ry + rz * rz).toDouble()).toFloat()
-
-                            // Forcejeo violento al arrebatar el teléfono (> 14.0 rad/s, aprox 800°/s):
-                            // Requiere confirmación de giro violento continuo para evitar falsos positivos
-                            if (rotMagnitude > 14.0f) {
-                                if (now - lastGyroSampleTime < 400) {
-                                    consecutiveGyroCount++
-                                } else {
-                                    consecutiveGyroCount = 1
-                                }
-                                lastGyroSampleTime = now
-
-                                if (consecutiveGyroCount >= 2 || rotMagnitude > 20.0f) {
-                                    consecutiveGyroCount = 0
-                                    lastTheftTriggerTime = now
-                                    onTheftSnatchDetected(
-                                        "sensor_antirrobo_giroscopio",
-                                        "Forcejeo violento detectado (Rotación: ${String.format(Locale.US, "%.1f", rotMagnitude)} rad/s)"
-                                    )
-                                }
-                            } else {
-                                if (now - lastGyroSampleTime > 400) {
-                                    consecutiveGyroCount = 0
-                                }
+                            if (magnitude >= 18.0f && lastCurrentLinearMag >= 15.0f) {
+                                isCandidate = true
+                                sourceCandidate = "sensor_antirrobo_giroscopio"
+                                detailCandidate = "Forcejeo violento de arrebato detectado (Rotación: ${String.format(Locale.US, "%.1f", magnitude)} rad/s)"
+                            } else if (magnitude >= 14.0f && lastCurrentLinearMag >= 20.0f) {
+                                isCandidate = true
+                                sourceCandidate = "sensor_antirrobo_fusion"
+                                detailCandidate = "Forcejeo con jalón detectado (Rotación: ${String.format(Locale.US, "%.1f", magnitude)} rad/s, Aceleración: ${String.format(Locale.US, "%.1f", lastCurrentLinearMag)} m/s²)"
                             }
                         }
+                    }
+
+                    if (isCandidate) {
+                        // Iniciar Fase 2: Ventana de Verificación de Fuga (2200 ms)
+                        // Permite corroborar si tras el jalón hay huida (carrera/moto) o si el celular quedó en reposo (cama/mesa)
+                        isVerifyingTheftEscape = true
+                        candidateSnatchTime = now
+                        candidateSnatchSource = sourceCandidate
+                        candidateSnatchDetail = detailCandidate
+                        tailMotionSamples = 0
+                        tailStillSamples = 0
+                        lastActiveMotionTimestamp = now
+
+                        // Capturar ubicación GPS inicial
+                        val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+                        candidateStartLocation = try {
+                            val gps = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                            val net = locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                            when {
+                                gps != null && net != null -> if (gps.time > net.time) gps else net
+                                gps != null -> gps
+                                else -> net
+                            }
+                        } catch (_: Exception) { null }
+
+                        escapeVerificationHandler?.removeCallbacksAndMessages(null)
+                        escapeVerificationHandler = android.os.Handler(android.os.Looper.getMainLooper())
+                        escapeVerificationHandler?.postDelayed({
+                            evaluatePostSnatchEscape()
+                        }, 2200L)
                     }
                 }
 
                 override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
             }
 
-            accelerometer?.let {
+            linearAccelerometer?.let {
+                sensorManager?.registerListener(sensorEventListener, it, SensorManager.SENSOR_DELAY_UI)
+            }
+            rawAccelerometer?.let {
                 sensorManager?.registerListener(sensorEventListener, it, SensorManager.SENSOR_DELAY_UI)
             }
             gyroscope?.let {
@@ -384,29 +471,106 @@ class EmergencyForegroundService : Service() {
         } catch (_: Exception) {}
     }
 
+    private fun evaluatePostSnatchEscape() {
+        if (!isVerifyingTheftEscape) return
+        isVerifyingTheftEscape = false
+
+        if (!isUserLoggedIn(this) || isEmergencyActive) return
+
+        val now = System.currentTimeMillis()
+        val timeSinceLastMotion = now - lastActiveMotionTimestamp
+
+        // Consultar ubicación GPS actual tras los 2.2 segundos
+        val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        var endLocation: Location? = null
+        try {
+            val gps = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+            val net = locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+            endLocation = when {
+                gps != null && net != null -> if (gps.time > net.time) gps else net
+                gps != null -> gps
+                else -> net
+            }
+        } catch (_: Exception) {}
+
+        val distanceMoved = if (candidateStartLocation != null && endLocation != null) {
+            candidateStartLocation!!.distanceTo(endLocation)
+        } else {
+            0f
+        }
+        val currentSpeed = endLocation?.speed ?: 0f // metros por segundo
+
+        android.util.Log.d(
+            "TheftDetector",
+            "Evaluación Fase 2: tiempoSinMov=${timeSinceLastMotion}ms, colaMov=$tailMotionSamples, colaQuieto=$tailStillSamples, dist=${distanceMoved}m, vel=${currentSpeed}m/s"
+        )
+
+        // FASE 2: VERIFICACIÓN ESTRICTA DE FUGA (ESTÁNDAR THEFT DETECTION DE GOOGLE)
+        // Para confirmar robo se EXIGE que el delincuente esté en fuga real.
+        // Un celular arrojado a la cama/mesa queda en reposo sin movimiento sostenido tras el impacto inicial.
+        
+        // CONDICIÓN A: Fuga en vehículo / motocicleta / bicicleta o alta velocidad GPS
+        val hasGpsTransit = (currentSpeed >= 2.2f && distanceMoved >= 5.0f) || (distanceMoved >= 8.0f)
+
+        // CONDICIÓN B: Fuga a pie (carrera con pasos activos ininterrumpidos hasta el final de la ventana)
+        // 1. Debe haber movimiento activo en el presente instante (última muestra hace menos de 350 ms)
+        // 2. En la segunda mitad de la ventana (cola > 900ms), debe haber al menos 6 muestras de movimiento sostenido
+        // 3. El movimiento activo debe superar al reposo
+        val hasPedestrianTransit = (timeSinceLastMotion < 350L) &&
+                                   (tailMotionSamples >= 6) &&
+                                   (tailMotionSamples > tailStillSamples)
+
+        val isConfirmedEscape = hasGpsTransit || hasPedestrianTransit
+
+        if (isConfirmedEscape) {
+            lastTheftTriggerTime = now
+            val escapeDescription = if (hasGpsTransit) {
+                "Fuga en vehículo/moto (${String.format(Locale.US, "%.1f", currentSpeed)} m/s, ${String.format(Locale.US, "%.1f", distanceMoved)} m)"
+            } else {
+                "Fuga a pie continua confirmada"
+            }
+            onTheftSnatchDetected(
+                candidateSnatchSource,
+                "$candidateSnatchDetail ($escapeDescription)"
+            )
+        } else {
+            android.util.Log.i("TheftDetector", "🛑 FALSO POSITIVO DESCARTADO: Fase 2 no cumplida (reposo en cama/mesa o sin escape continuo).")
+        }
+    }
+
     private fun unregisterSensorListener() {
         try {
+            escapeVerificationHandler?.removeCallbacksAndMessages(null)
+            escapeVerificationHandler = null
+            isVerifyingTheftEscape = false
             sensorEventListener?.let {
                 sensorManager?.unregisterListener(it)
             }
         } catch (_: Exception) {}
         sensorEventListener = null
         sensorManager = null
-        accelerometer = null
+        linearAccelerometer = null
+        rawAccelerometer = null
         gyroscope = null
     }
 
     private fun onTriplePowerPressDetected() {
+        if (!isUserLoggedIn(this)) return
         if (isEmergencyActive) return
         startEmergencyFlow("power_button_3x", "ROBO", "Se detectaron 3 pulsaciones rápidas del botón de encendido")
     }
 
     private fun onTheftSnatchDetected(source: String, detailInfo: String) {
+        if (!isUserLoggedIn(this)) return
         if (isEmergencyActive) return
         startEmergencyFlow(source, "ROBO", detailInfo)
     }
 
     private fun startEmergencyFlow(source: String, alertType: String, detailInfo: String) {
+        if (!isUserLoggedIn(this)) {
+            return
+        }
+
         // Si ya hay una emergencia en curso y no ha sido cancelada, ignorar disparos adicionales de pánico
         if (isEmergencyActive && !isEmergencyDispatched) {
             return
@@ -491,7 +655,10 @@ class EmergencyForegroundService : Service() {
             }
 
             override fun onFinish() {
-                if (isEmergencyActive && !isEmergencyDispatched) {
+                val shouldDispatch = isEmergencyActive && !isEmergencyDispatched
+                isEmergencyActive = false
+                activeCountdownTimer = null
+                if (shouldDispatch) {
                     dispatchEmergencyAlertFromService(source, alertType)
                 }
             }
@@ -531,6 +698,7 @@ class EmergencyForegroundService : Service() {
     }
 
     private fun dispatchEmergencyAlertFromService(source: String, alertType: String) {
+        if (!isUserLoggedIn(this)) return
         Thread {
             var nativeSuccess = false
             var createdReportId: Long? = null
@@ -718,6 +886,7 @@ class EmergencyForegroundService : Service() {
 
                 // 6. Actualizar flags de despacho y éxito
                 isEmergencyDispatched = true
+                isEmergencyActive = false
                 prefs.edit()
                     .putBoolean("flutter.pending_emergency_dispatched", true)
                     .putBoolean("flutter.pending_emergency_active", false)
@@ -782,6 +951,10 @@ class EmergencyForegroundService : Service() {
     }
 
     override fun onTaskRemoved(rootIntent: Intent?) {
+        if (!isUserLoggedIn(applicationContext)) {
+            super.onTaskRemoved(rootIntent)
+            return
+        }
         val restartServiceIntent = Intent(applicationContext, EmergencyForegroundService::class.java).apply {
             setPackage(packageName)
         }

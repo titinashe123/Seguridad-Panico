@@ -7,6 +7,7 @@ import '../../../data/services/location_tracking_service.dart';
 import '../../../data/services/session_service.dart';
 import '../../../data/services/gps_location_service.dart';
 import '../../../data/services/hardware_trigger_service.dart';
+import '../../../data/services/biometric_auth_service.dart';
 import '../reports/new_report_view.dart';
 
 class EmergencyCountdownDialog extends StatefulWidget {
@@ -29,6 +30,11 @@ class EmergencyCountdownDialog extends StatefulWidget {
     bool isDirectWhatsAppApi = true,
     String source = 'BOTÓN PRINCIPAL',
   }) async {
+    // Si el usuario no ha iniciado sesión, no permitir mostrar el diálogo de emergencia
+    final loggedIn = await SessionService.isLoggedIn();
+    if (!loggedIn) return;
+    if (!context.mounted) return;
+
     if (_isOpen) return;
     _isOpen = true;
     try {
@@ -44,6 +50,7 @@ class EmergencyCountdownDialog extends StatefulWidget {
       );
     } finally {
       _isOpen = false;
+      HardwareTriggerService().resetEmergencyState();
     }
   }
 
@@ -57,6 +64,7 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
   Timer? _timer;
   final _pinController = TextEditingController();
   late AnimationController _pulseController;
+  bool _canUseBiometrics = false;
 
   @override
   void initState() {
@@ -66,7 +74,18 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
       duration: const Duration(milliseconds: 1000),
     )..repeat(reverse: true);
 
+    _checkBiometrics();
     _startTimer();
+  }
+
+  Future<void> _checkBiometrics() async {
+    final ready = await BiometricAuthService.isBiometricsReady();
+    final enabled = await BiometricAuthService.isBiometricsEnabled();
+    if (mounted) {
+      setState(() {
+        _canUseBiometrics = ready && enabled;
+      });
+    }
   }
 
   void _startTimer() {
@@ -234,6 +253,34 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
     );
+  }
+
+  void _onBiometricCancel() async {
+    final authenticated = await BiometricAuthService.authenticate(
+      reason: 'Coloca tu huella digital para cancelar la alerta de emergencia',
+    );
+
+    if (authenticated) {
+      _timer?.cancel();
+      HardwareTriggerService().cancelEmergency();
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Alerta cancelada con huella digital.',
+            style: GoogleFonts.inter(
+              color: Colors.white,
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+            ),
+          ),
+          backgroundColor: const Color(0xFF1E293B),
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      );
+    }
   }
 
   @override
@@ -446,7 +493,31 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
                   ),
                 ),
 
-                const SizedBox(height: 22),
+                const SizedBox(height: 18),
+
+                // Botón de Cancelación con Huella Digital
+                if (_canUseBiometrics) ...[
+                  ElevatedButton.icon(
+                    onPressed: _onBiometricCancel,
+                    icon: const Icon(Icons.fingerprint, color: Colors.white, size: 24),
+                    label: Text(
+                      'CANCELAR CON HUELLA',
+                      style: GoogleFonts.inter(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w800,
+                        letterSpacing: 0.8,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.accentBlue,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      elevation: 4,
+                      shadowColor: AppColors.accentBlue.withValues(alpha: 0.4),
+                    ),
+                  ),
+                  const SizedBox(height: 10),
+                ],
 
                 // Cancel Button (Green)
                 ElevatedButton(
@@ -459,7 +530,7 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
                     shadowColor: AppColors.accentGreen.withValues(alpha: 0.4),
                   ),
                   child: Text(
-                    'CANCELAR ALERTA',
+                    'CANCELAR CON PIN',
                     style: GoogleFonts.inter(
                       fontSize: 14,
                       fontWeight: FontWeight.w800,

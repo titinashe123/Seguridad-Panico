@@ -86,6 +86,15 @@ class HardwareTriggerService {
     }
   }
 
+  /// Limpia el estado de emergencia activo para permitir nuevas activaciones
+  Future<void> resetEmergencyState() async {
+    try {
+      await _channel.invokeMethod('resetEmergencyState');
+    } catch (e) {
+      developer.log('Error reseteando estado de emergencia nativo: $e', name: 'HardwareTriggerService');
+    }
+  }
+
   /// Verifica si la actividad nativa fue despertada por una emergencia pendiente mientras Flutter cargaba
   Future<void> checkPendingTriggers() async {
     try {
@@ -98,13 +107,13 @@ class HardwareTriggerService {
 
         if (isDispatched) {
           developer.log('🚨 ALERTA YA DESPACHADA EN SEGUNDO PLANO: $alertType ($source, nativoOk: $nativeSuccess)', name: 'HardwareTriggerService');
-          Future.delayed(const Duration(milliseconds: 350), () {
+          Future.delayed(const Duration(milliseconds: 50), () {
             _onEmergencyDispatched?.call(alertType, source, nativeSuccess);
           });
         } else {
           developer.log('🚨 DISPARO PENDIENTE AL ABRIR LA APP: $source ($alertType)', name: 'HardwareTriggerService');
-          // Pequeño delay para asegurar que el widget esté montado en el árbol
-          Future.delayed(const Duration(milliseconds: 350), () {
+          // Delay mínimo de 50ms para asegurar el primer frame montado
+          Future.delayed(const Duration(milliseconds: 50), () {
             _onHardwareTriggered?.call(source, alertType);
           });
         }

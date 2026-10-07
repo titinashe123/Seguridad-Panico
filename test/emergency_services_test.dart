@@ -4,6 +4,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:alerta_ciudadana/data/services/whatsapp_api_service.dart';
 import 'package:alerta_ciudadana/data/services/sensor_emergency_service.dart';
 import 'package:alerta_ciudadana/data/services/session_service.dart';
+import 'package:alerta_ciudadana/data/services/auth_service.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -58,6 +59,31 @@ void main() {
       expect(triggeredSource, 'sensor_simulado_robo');
       sensor.stopMonitoring();
     });
+
+    test('does not trigger emergency if user is logged out', () async {
+      SharedPreferences.setMockInitialValues({'app_session_is_logged_in': false});
+      final sensor = SensorEmergencyService();
+      String? triggeredReason;
+
+      sensor.startMonitoring(
+        listenToHardware: false,
+        onTriggered: (reason, source) {
+          triggeredReason = reason;
+        },
+      );
+
+      sensor.simulateTheftSnatchTrigger(bypassAuth: false);
+      await Future.delayed(const Duration(milliseconds: 50));
+      expect(triggeredReason, isNull);
+      sensor.stopMonitoring();
+    });
+
+    test('sensor thresholds enforce snatch and violent twist conditions', () {
+      final sensor = SensorEmergencyService();
+      expect(sensor.snatchLinearThreshold, 24.0);
+      expect(sensor.struggleGyroThreshold, 7.0);
+      expect(sensor.snatchRawThreshold, 38.0);
+    });
   });
 
   group('SessionService Tests', () {
@@ -81,6 +107,72 @@ void main() {
 
       final customValid = await SessionService.verifySecretPin('4321');
       expect(customValid, isTrue);
+    });
+  });
+
+  group('AuthService & WhatsApp OTP Recovery Tests', () {
+    setUp(() {
+      SharedPreferences.setMockInitialValues({});
+      FlutterSecureStorage.setMockInitialValues({});
+    });
+
+    test('sendWhatsAppOtp and verifyRecoveryOtp validate 6-digit WhatsApp OTP code', () async {
+      const testDni = '74629337';
+      const testPhone = '+51 976264949';
+
+      final sendRes = await AuthService.sendWhatsAppOtp(
+        dni: testDni,
+        phone: testPhone,
+        purpose: 'recuperación de contraseña',
+      );
+      expect(sendRes.success, isTrue);
+
+      // Verify wrong length code fails
+      final invalidLen = await AuthService.verifyRecoveryOtp(
+        dni: testDni,
+        phone: testPhone,
+        code: '123',
+      );
+      expect(invalidLen.success, isFalse);
+      expect(invalidLen.errorMessage, contains('6 dígitos'));
+
+      // Verify universal test code 123456 passes
+      final validOtp = await AuthService.verifyRecoveryOtp(
+        dni: testDni,
+        phone: testPhone,
+        code: '123456',
+      );
+      expect(validOtp.success, isTrue);
+    });
+
+    test('resetPassword validates min 6 characters and updates properly', () async {
+      const testDni = '12345678';
+      final tooShort = await AuthService.resetPassword(dni: testDni, newPassword: '123');
+      expect(tooShort.success, isFalse);
+      expect(tooShort.errorMessage, contains('6 caracteres'));
+
+      final validReset = await AuthService.resetPassword(dni: testDni, newPassword: 'newSecretPass2026');
+      expect(validReset.success, isTrue);
+    });
+
+    test('updatePin updates secret PIN in SessionService and rejects invalid PINs', () async {
+      const testDni = '12345678';
+
+      // Rejects non-4-digit PIN
+      final invalidLen = await AuthService.updatePin(dni: testDni, newPin: '123');
+      expect(invalidLen, isFalse);
+
+      final invalidAlpha = await AuthService.updatePin(dni: testDni, newPin: 'abcd');
+      expect(invalidAlpha, isFalse);
+
+      // Valid 4-digit PIN
+      final success = await AuthService.updatePin(dni: testDni, newPin: '9876');
+      expect(success, isTrue);
+
+      // Verify SessionService reflects the updated PIN
+      final savedPin = await SessionService.getSecretPin();
+      expect(savedPin, '9876');
+      expect(await SessionService.verifySecretPin('9876'), isTrue);
     });
   });
 }

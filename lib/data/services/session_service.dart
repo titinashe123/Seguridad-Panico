@@ -1,5 +1,6 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'hardware_trigger_service.dart';
 
 /// Servicio para persistencia segura de sesión de usuario y PIN secreto en almacenamiento seguro
 /// Cumple con: HU-SEG-02 (flutter_secure_storage / Keychain & Keystore)
@@ -16,6 +17,7 @@ class SessionService {
   static const String _keySecretPin = 'app_session_secret_pin';
   static const String _keyJwtToken = 'app_session_jwt_token';
   static const String _keyUserIdPersona = 'app_session_user_id_persona';
+  static const String _keyLastDni = 'app_last_used_dni';
 
   /// Guarda la sesión del ciudadano en almacenamiento seguro encriptado
   static Future<void> saveSession({
@@ -29,6 +31,7 @@ class SessionService {
     final prefs = await SharedPreferences.getInstance();
     await prefs.setBool(_keyIsLoggedIn, true);
     await prefs.setString(_keyUserDni, dni);
+    await prefs.setString(_keyLastDni, dni);
     await prefs.setString(_keyUserName, name);
     await prefs.setString(_keyUserPhone, phone);
     if (idPersona != null) {
@@ -55,6 +58,20 @@ class SessionService {
   static Future<int?> getIdPersona() async {
     final prefs = await SharedPreferences.getInstance();
     return prefs.getInt(_keyUserIdPersona);
+  }
+
+  /// Obtiene el último DNI registrado o utilizado en el dispositivo
+  static Future<String?> getLastDni() async {
+    final prefs = await SharedPreferences.getInstance();
+    final last = prefs.getString(_keyLastDni);
+    if (last != null && last.isNotEmpty) return last;
+    return prefs.getString(_keyUserDni);
+  }
+
+  /// Guarda el último DNI para prellenar o login biométrico
+  static Future<void> saveLastDni(String dni) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyLastDni, dni.trim());
   }
 
   /// Verifica si el usuario tiene una sesión activa previa
@@ -145,6 +162,12 @@ class SessionService {
 
     try {
       await _secureStorage.deleteAll();
+    } catch (_) {}
+
+    try {
+      await prefs.setBool(_keyIsLoggedIn, false);
+      await HardwareTriggerService().cancelEmergency();
+      await HardwareTriggerService().stopBackgroundService();
     } catch (_) {}
   }
 }

@@ -7,6 +7,8 @@ import '../reports/new_report_view.dart';
 import '../auth/login_view.dart';
 import '../../../data/services/session_service.dart';
 import '../../../data/services/report_storage_service.dart';
+import '../../../data/services/auth_service.dart';
+import '../../../data/services/biometric_auth_service.dart';
 
 class MainLayoutView extends StatefulWidget {
   const MainLayoutView({super.key});
@@ -569,8 +571,9 @@ class _ProfileViewState extends State<_ProfileView> {
     'name': 'Cargando...',
     'phone': '...',
   };
-  String? _jwtToken;
   bool _isLoading = true;
+  bool _hasBiometrics = false;
+  bool _biometricsEnabled = false;
 
   @override
   void initState() {
@@ -580,12 +583,14 @@ class _ProfileViewState extends State<_ProfileView> {
 
   Future<void> _loadUserProfile() async {
     final user = await SessionService.getUserData();
-    final token = await SessionService.getJwtToken();
+    final hasBio = await BiometricAuthService.isBiometricsReady();
+    final bioEnabled = await BiometricAuthService.isBiometricsEnabled();
 
     if (mounted) {
       setState(() {
         _userData = user;
-        _jwtToken = token;
+        _hasBiometrics = hasBio;
+        _biometricsEnabled = bioEnabled;
         _isLoading = false;
       });
     }
@@ -677,17 +682,61 @@ class _ProfileViewState extends State<_ProfileView> {
                   _buildProfileTile(Icons.badge_outlined, 'Documento Nacional (DNI)', dni),
                   _buildProfileTile(Icons.phone_outlined, 'Teléfono Vinculado (WhatsApp)', phone),
                   _buildProfileTile(
-                    Icons.security_rounded,
-                    'Seguridad de Sesión',
-                    _jwtToken != null ? 'Token JWT 60 días activo (Almacenamiento Seguro)' : 'Sesión activa',
-                  ),
-                  _buildProfileTile(
                     Icons.lock_clock_outlined,
-                    'PIN Secreto de Cancelación',
-                    'Toca para ver o cambiar tu PIN de 4 dígitos',
-                    trailing: const Icon(Icons.edit, color: AppColors.accentOrange, size: 18),
-                    onTap: () => _showChangePinDialog(context),
+                    'PIN Secreto',
+                    '•••• (PIN de seguridad protegido)',
+                    trailing: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                      decoration: BoxDecoration(
+                        color: AppColors.accentOrange.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(color: AppColors.accentOrange.withValues(alpha: 0.4)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.edit, color: AppColors.accentOrange, size: 14),
+                          const SizedBox(width: 4),
+                          Text(
+                            'CAMBIAR',
+                            style: GoogleFonts.inter(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: AppColors.accentOrange,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    onTap: () => _showChangePinOptionsDialog(context, dni, phone),
                   ),
+                  if (_hasBiometrics)
+                    _buildProfileTile(
+                      Icons.fingerprint,
+                      'Acceso con Huella Digital',
+                      _biometricsEnabled
+                          ? 'Activado (Inicio rápido y cancelar alertas)'
+                          : 'Desactivado (Usar solo PIN)',
+                      trailing: Transform.scale(
+                        scale: 0.85,
+                        child: Switch(
+                          value: _biometricsEnabled,
+                          activeThumbColor: AppColors.accentBlue,
+                          onChanged: (val) async {
+                            if (val) {
+                              final ok = await BiometricAuthService.authenticate(
+                                reason: 'Coloca tu huella digital para activar esta opción',
+                              );
+                              if (!ok) return;
+                            }
+                            await BiometricAuthService.setBiometricsEnabled(val);
+                            if (mounted) {
+                              setState(() => _biometricsEnabled = val);
+                            }
+                          },
+                        ),
+                      ),
+                    ),
                   const SizedBox(height: 32),
                   OutlinedButton.icon(
                     onPressed: () async {
@@ -714,95 +763,708 @@ class _ProfileViewState extends State<_ProfileView> {
     );
   }
 
-  Future<void> _showChangePinDialog(BuildContext context) async {
-    final currentPin = await SessionService.getSecretPin();
-    final pinController = TextEditingController(text: currentPin);
-    if (!context.mounted) return;
+  void _showChangePinOptionsDialog(BuildContext context, String dni, String phone) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppColors.surface,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        side: BorderSide(color: AppColors.accentOrange, width: 1.5),
+      ),
+      builder: (bctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    decoration: BoxDecoration(
+                      color: Colors.white24,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 16),
+                Row(
+                  children: [
+                    const Icon(Icons.pin, color: AppColors.accentOrange, size: 24),
+                    const SizedBox(width: 10),
+                    Text(
+                      'Cambiar PIN Secreto',
+                      style: GoogleFonts.inter(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'Selecciona una opción para actualizar tu PIN secreto de seguridad (4 dígitos):',
+                  style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+                ),
+                const SizedBox(height: 20),
+                // Opción 1: Conozco mi PIN actual
+                InkWell(
+                  onTap: () {
+                    Navigator.of(bctx).pop();
+                    _showChangePinWithCurrentPinDialog(context, dni);
+                  },
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceElevated,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: AppColors.accentOrange.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(Icons.password_rounded, color: AppColors.accentOrange, size: 24),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Conozco mi PIN actual',
+                                style: GoogleFonts.inter(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Ingresa tu PIN actual y luego escribe tu nuevo PIN.',
+                                style: GoogleFonts.inter(fontSize: 12, color: AppColors.textSecondary),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.chevron_right, color: AppColors.accentOrange),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                // Opción 2: Olvidé mi PIN
+                InkWell(
+                  onTap: () {
+                    Navigator.of(bctx).pop();
+                    _showChangePinWithOtpDialog(context, dni, phone);
+                  },
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    padding: const EdgeInsets.all(14),
+                    decoration: BoxDecoration(
+                      color: AppColors.surfaceElevated,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: AppColors.border),
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.all(10),
+                          decoration: BoxDecoration(
+                            color: AppColors.accentGreen.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(Icons.mark_chat_unread_outlined, color: AppColors.accentGreen, size: 24),
+                        ),
+                        const SizedBox(width: 14),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                'Olvidé mi PIN',
+                                style: GoogleFonts.inter(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(height: 4),
+                              Text(
+                                'Recupera enviando un código a tu WhatsApp.',
+                                style: GoogleFonts.inter(fontSize: 12, color: AppColors.textSecondary),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const Icon(Icons.chevron_right, color: AppColors.accentGreen),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showChangePinWithCurrentPinDialog(BuildContext context, String dni) {
+    final currentPinController = TextEditingController();
+    final newPinController = TextEditingController();
+    final confirmPinController = TextEditingController();
+    String? errorMessage;
+    bool isSaving = false;
 
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: AppColors.accentOrange, width: 1.5),
-        ),
-        title: Row(
-          children: [
-            const Icon(Icons.pin, color: AppColors.accentOrange, size: 24),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                'PIN de Cancelación',
-                style: GoogleFonts.inter(
-                  fontSize: 18,
-                  fontWeight: FontWeight.bold,
-                  color: Colors.white,
+      builder: (dctx) {
+        return StatefulBuilder(
+          builder: (context, setDState) {
+            return AlertDialog(
+              backgroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: const BorderSide(color: AppColors.accentOrange, width: 1.5),
+              ),
+              title: Row(
+                children: [
+                  const Icon(Icons.password_rounded, color: AppColors.accentOrange, size: 24),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Cambiar PIN Actual',
+                      style: GoogleFonts.inter(
+                        fontSize: 17,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (errorMessage != null) ...[
+                      Container(
+                        padding: const EdgeInsets.all(8),
+                        margin: const EdgeInsets.only(bottom: 12),
+                        decoration: BoxDecoration(
+                          color: AppColors.error.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: AppColors.error),
+                        ),
+                        child: Text(
+                          errorMessage!,
+                          style: GoogleFonts.inter(fontSize: 12, color: AppColors.error),
+                        ),
+                      ),
+                    ],
+                    Text(
+                      'PIN ACTUAL (4 DÍGITOS)',
+                      style: GoogleFonts.inter(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.textSecondary,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: currentPinController,
+                      keyboardType: TextInputType.number,
+                      obscureText: true,
+                      maxLength: 4,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(fontSize: 18, color: Colors.white, letterSpacing: 6),
+                      decoration: const InputDecoration(counterText: '', hintText: '••••'),
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      'NUEVO PIN (4 DÍGITOS)',
+                      style: GoogleFonts.inter(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.textSecondary,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: newPinController,
+                      keyboardType: TextInputType.number,
+                      obscureText: true,
+                      maxLength: 4,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(fontSize: 18, color: Colors.white, letterSpacing: 6),
+                      decoration: const InputDecoration(counterText: '', hintText: '••••'),
+                    ),
+                    const SizedBox(height: 14),
+                    Text(
+                      'CONFIRMAR NUEVO PIN',
+                      style: GoogleFonts.inter(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.textSecondary,
+                        letterSpacing: 1,
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    TextField(
+                      controller: confirmPinController,
+                      keyboardType: TextInputType.number,
+                      obscureText: true,
+                      maxLength: 4,
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(fontSize: 18, color: Colors.white, letterSpacing: 6),
+                      decoration: const InputDecoration(counterText: '', hintText: '••••'),
+                    ),
+                  ],
                 ),
               ),
-            ),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              'Este PIN de 4 dígitos te permite cancelar la alarma durante la cuenta regresiva de 5 segundos.',
-              style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
-            ),
-            const SizedBox(height: 16),
-            TextField(
-              controller: pinController,
-              keyboardType: TextInputType.number,
-              maxLength: 4,
-              style: GoogleFonts.inter(
-                fontSize: 24,
-                color: Colors.white,
-                letterSpacing: 8,
-                fontWeight: FontWeight.bold,
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dctx).pop(),
+                  child: Text(
+                    'CANCELAR',
+                    style: GoogleFonts.inter(color: AppColors.textSecondary, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: AppColors.accentOrange),
+                  onPressed: isSaving
+                      ? null
+                      : () async {
+                          final curPin = currentPinController.text.trim();
+                          final nPin = newPinController.text.trim();
+                          final cPin = confirmPinController.text.trim();
+
+                          if (curPin.length != 4 || nPin.length != 4 || cPin.length != 4) {
+                            setDState(() => errorMessage = 'Todos los campos deben tener 4 dígitos.');
+                            return;
+                          }
+
+                          if (int.tryParse(nPin) == null) {
+                            setDState(() => errorMessage = 'El PIN debe ser numérico.');
+                            return;
+                          }
+
+                          if (nPin != cPin) {
+                            setDState(() => errorMessage = 'El nuevo PIN y su confirmación no coinciden.');
+                            return;
+                          }
+
+                          setDState(() {
+                            isSaving = true;
+                            errorMessage = null;
+                          });
+
+                          final isCurrentValid = await SessionService.verifySecretPin(curPin);
+                          if (!isCurrentValid) {
+                            setDState(() {
+                              isSaving = false;
+                              errorMessage = 'El PIN actual ingresado es incorrecto.';
+                            });
+                            return;
+                          }
+
+                          await AuthService.updatePin(dni: dni, newPin: nPin);
+
+                          if (dctx.mounted) Navigator.of(dctx).pop();
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              SnackBar(
+                                content: Text(
+                                  '¡PIN secreto actualizado con éxito!',
+                                  style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: Colors.black),
+                                ),
+                                backgroundColor: AppColors.accentGreen,
+                                behavior: SnackBarBehavior.floating,
+                              ),
+                            );
+                            setState(() {});
+                          }
+                        },
+                  child: isSaving
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(color: Colors.black, strokeWidth: 2),
+                        )
+                      : Text(
+                          'CAMBIAR PIN',
+                          style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: Colors.black),
+                        ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showChangePinWithOtpDialog(BuildContext context, String dni, String phone) {
+    final otpController = TextEditingController();
+    final newPinController = TextEditingController();
+    final confirmPinController = TextEditingController();
+
+    int step = 1; // 1: Enviar OTP, 2: Ingresar OTP, 3: Nuevo PIN
+    bool isProcessing = false;
+    String? errorMessage;
+
+    String maskPhone(String p) {
+      final digits = p.replaceAll(RegExp(r'\D'), '');
+      if (digits.length >= 7) {
+        final start = digits.substring(0, 3);
+        final end = digits.substring(digits.length - 2);
+        return '+$start *** **$end';
+      }
+      return p;
+    }
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dctx) {
+        return StatefulBuilder(
+          builder: (context, setDState) {
+            return AlertDialog(
+              backgroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: const BorderSide(color: AppColors.accentOrange, width: 1.5),
               ),
-              textAlign: TextAlign.center,
-              decoration: InputDecoration(
-                counterText: '',
-                hintText: '4 dígitos',
-                filled: true,
-                fillColor: AppColors.surfaceElevated,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(ctx).pop(),
-            child: Text('CANCELAR', style: GoogleFonts.inter(color: Colors.white54)),
-          ),
-          ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.accentOrange),
-            onPressed: () async {
-              final newPin = pinController.text.trim();
-              if (newPin.length == 4 && int.tryParse(newPin) != null) {
-                await SessionService.setSecretPin(newPin);
-                if (ctx.mounted) Navigator.of(ctx).pop();
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('PIN actualizado a $newPin con éxito'),
-                      backgroundColor: AppColors.accentGreen,
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppColors.accentOrange.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                  );
-                  setState(() {});
-                }
-              }
-            },
-            child: Text(
-              'GUARDAR PIN',
-              style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: Colors.black),
-            ),
-          ),
-        ],
-      ),
+                    child: Icon(
+                      step == 1
+                          ? Icons.phonelink_ring_outlined
+                          : step == 2
+                              ? Icons.mark_chat_unread_outlined
+                              : Icons.pin_outlined,
+                      color: AppColors.accentOrange,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      step == 1
+                          ? 'Recuperar PIN'
+                          : step == 2
+                              ? 'Validar WhatsApp'
+                              : 'Nuevo PIN',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              content: SizedBox(
+                width: double.maxFinite,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (errorMessage != null) ...[
+                        Container(
+                          padding: const EdgeInsets.all(8),
+                          margin: const EdgeInsets.only(bottom: 12),
+                          decoration: BoxDecoration(
+                            color: AppColors.error.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(color: AppColors.error),
+                          ),
+                          child: Text(
+                            errorMessage!,
+                            style: GoogleFonts.inter(fontSize: 12, color: AppColors.error),
+                          ),
+                        ),
+                      ],
+                      if (step == 1) ...[
+                        Text(
+                          'Enviaremos un código de seguridad de 6 dígitos a tu WhatsApp vinculado (${maskPhone(phone)}) para autorizar el restablecimiento de tu PIN secreto.',
+                          style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+                        ),
+                        const SizedBox(height: 16),
+                        Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: AppColors.surfaceElevated,
+                            borderRadius: BorderRadius.circular(10),
+                            border: Border.all(color: AppColors.border),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(Icons.phone_outlined, color: AppColors.accentGreen, size: 20),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  phone,
+                                  style: GoogleFonts.chakraPetch(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ] else if (step == 2) ...[
+                        Text(
+                          'Ingresa el código de 6 dígitos que enviamos a tu WhatsApp (${maskPhone(phone)}):',
+                          style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+                        ),
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const Icon(Icons.timer_outlined, size: 16, color: AppColors.accentOrange),
+                            const SizedBox(width: 6),
+                            Text(
+                              'Válido por: 5 minutos',
+                              style: GoogleFonts.chakraPetch(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: AppColors.accentOrange,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 16),
+                        TextField(
+                          controller: otpController,
+                          keyboardType: TextInputType.number,
+                          maxLength: 6,
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.inter(
+                            fontSize: 22,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 8,
+                            color: Colors.white,
+                          ),
+                          decoration: const InputDecoration(hintText: '••••••', counterText: ''),
+                        ),
+                        const SizedBox(height: 8),
+                        TextButton(
+                          onPressed: isProcessing
+                              ? null
+                              : () async {
+                                  setDState(() {
+                                    isProcessing = true;
+                                    errorMessage = null;
+                                  });
+                                  await AuthService.sendWhatsAppOtp(
+                                    dni: dni,
+                                    phone: phone,
+                                    purpose: 'cambio de PIN secreto',
+                                  );
+                                  setDState(() {
+                                    isProcessing = false;
+                                    errorMessage = 'Código reenviado a tu WhatsApp';
+                                  });
+                                },
+                          child: Text(
+                            '¿No te llegó el código? Reenviar por WhatsApp',
+                            style: GoogleFonts.inter(fontSize: 12, color: AppColors.accentOrange),
+                          ),
+                        ),
+                      ] else if (step == 3) ...[
+                        Text(
+                          'Código verificado. Ingresa tu nuevo PIN secreto de 4 dígitos para cancelar alarmas:',
+                          style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+                        ),
+                        const SizedBox(height: 14),
+                        Text(
+                          'NUEVO PIN (4 DÍGITOS)',
+                          style: GoogleFonts.inter(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.textSecondary,
+                            letterSpacing: 1,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        TextField(
+                          controller: newPinController,
+                          keyboardType: TextInputType.number,
+                          obscureText: true,
+                          maxLength: 4,
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.inter(fontSize: 20, color: Colors.white, letterSpacing: 8),
+                          decoration: const InputDecoration(counterText: '', hintText: '••••'),
+                        ),
+                        const SizedBox(height: 12),
+                        Text(
+                          'CONFIRMAR NUEVO PIN',
+                          style: GoogleFonts.inter(
+                            fontSize: 11,
+                            fontWeight: FontWeight.bold,
+                            color: AppColors.textSecondary,
+                            letterSpacing: 1,
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        TextField(
+                          controller: confirmPinController,
+                          keyboardType: TextInputType.number,
+                          obscureText: true,
+                          maxLength: 4,
+                          textAlign: TextAlign.center,
+                          style: GoogleFonts.inter(fontSize: 20, color: Colors.white, letterSpacing: 8),
+                          decoration: const InputDecoration(counterText: '', hintText: '••••'),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dctx).pop(),
+                  child: Text(
+                    'CANCELAR',
+                    style: GoogleFonts.inter(color: AppColors.textSecondary, fontWeight: FontWeight.bold),
+                  ),
+                ),
+                ElevatedButton(
+                  style: ElevatedButton.styleFrom(backgroundColor: AppColors.accentOrange),
+                  onPressed: isProcessing
+                      ? null
+                      : () async {
+                          if (step == 1) {
+                            setDState(() {
+                              isProcessing = true;
+                              errorMessage = null;
+                            });
+
+                            final res = await AuthService.sendWhatsAppOtp(
+                              dni: dni,
+                              phone: phone,
+                              purpose: 'cambio de PIN secreto',
+                            );
+
+                            setDState(() {
+                              isProcessing = false;
+                              if (res.success) {
+                                step = 2;
+                              } else {
+                                errorMessage = res.errorMessage ?? 'Error al enviar código.';
+                              }
+                            });
+                          } else if (step == 2) {
+                            final code = otpController.text.trim();
+                            if (code.length != 6) {
+                              setDState(() => errorMessage = 'El código debe tener 6 dígitos.');
+                              return;
+                            }
+
+                            setDState(() {
+                              isProcessing = true;
+                              errorMessage = null;
+                            });
+
+                            final verifyRes = await AuthService.verifyRecoveryOtp(
+                              dni: dni,
+                              phone: phone,
+                              code: code,
+                            );
+
+                            setDState(() {
+                              isProcessing = false;
+                              if (verifyRes.success) {
+                                step = 3;
+                              } else {
+                                errorMessage = verifyRes.errorMessage ?? 'Código inválido o expirado.';
+                              }
+                            });
+                          } else if (step == 3) {
+                            final nPin = newPinController.text.trim();
+                            final cPin = confirmPinController.text.trim();
+
+                            if (nPin.length != 4 || cPin.length != 4) {
+                              setDState(() => errorMessage = 'El PIN debe tener 4 dígitos.');
+                              return;
+                            }
+
+                            if (int.tryParse(nPin) == null) {
+                              setDState(() => errorMessage = 'El PIN debe ser numérico.');
+                              return;
+                            }
+
+                            if (nPin != cPin) {
+                              setDState(() => errorMessage = 'Los pines ingresados no coinciden.');
+                              return;
+                            }
+
+                            setDState(() {
+                              isProcessing = true;
+                              errorMessage = null;
+                            });
+
+                            await AuthService.updatePin(dni: dni, newPin: nPin);
+
+                            if (dctx.mounted) Navigator.of(dctx).pop();
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text(
+                                    '¡Nuevo PIN secreto establecido con éxito!',
+                                    style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: Colors.black),
+                                  ),
+                                  backgroundColor: AppColors.accentGreen,
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                              setState(() {});
+                            }
+                          }
+                        },
+                  child: isProcessing
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(color: Colors.black, strokeWidth: 2),
+                        )
+                      : Text(
+                          step == 1
+                              ? 'ENVIAR CÓDIGO'
+                              : step == 2
+                                  ? 'VERIFICAR CÓDIGO'
+                                  : 'GUARDAR PIN',
+                          style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: Colors.black),
+                        ),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 
