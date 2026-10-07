@@ -159,6 +159,7 @@ class SessionService {
     await prefs.remove(_keyUserPhone);
     await prefs.remove(_keySecretPin);
     await prefs.remove(_keyJwtToken);
+    await prefs.remove(_keyUserIdPersona);
 
     try {
       await _secureStorage.deleteAll();

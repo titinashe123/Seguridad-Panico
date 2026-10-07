@@ -411,7 +411,7 @@ class _ReportsListViewState extends State<_ReportsListView> {
                             ),
                             const SizedBox(height: 18),
                             Text(
-                              'No hay reportes registrados aún',
+                              'No tienes reportes registrados aún',
                               style: GoogleFonts.inter(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
@@ -420,7 +420,7 @@ class _ReportsListViewState extends State<_ReportsListView> {
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              'Todos los incidentes y alertas de pánico que despaches quedarán registrados aquí de forma permanente.',
+                              'Los incidentes y alertas de emergencia que envíes con tu cuenta quedarán registrados aquí.',
                               textAlign: TextAlign.center,
                               style: GoogleFonts.inter(
                                 fontSize: 12,
