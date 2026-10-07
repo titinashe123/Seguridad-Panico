@@ -1,5 +1,6 @@
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'app_lock_service.dart';
 import 'hardware_trigger_service.dart';
 
 /// Servicio para persistencia segura de sesión de usuario y PIN secreto en almacenamiento seguro
@@ -167,6 +168,7 @@ class SessionService {
 
     try {
       await prefs.setBool(_keyIsLoggedIn, false);
+      AppLockService().onLogout();
       await HardwareTriggerService().cancelEmergency();
       await HardwareTriggerService().stopBackgroundService();
     } catch (_) {}

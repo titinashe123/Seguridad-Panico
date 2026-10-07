@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
+import '../../../data/services/app_lock_service.dart';
 import '../../../data/services/auth_service.dart';
 import '../navigation/main_layout_view.dart';
 
@@ -271,6 +272,7 @@ class _RegisterViewState extends State<RegisterView> {
                                 duration: const Duration(seconds: 2),
                               ),
                             );
+                            AppLockService().markJustLoggedIn();
                             Navigator.of(context).pushAndRemoveUntil(
                               MaterialPageRoute(builder: (_) => const MainLayoutView()),
                               (route) => false,

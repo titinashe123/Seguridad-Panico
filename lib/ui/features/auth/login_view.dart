@@ -5,6 +5,7 @@ import '../../../core/widgets/tactical_shield_logo.dart';
 import '../../../data/services/auth_service.dart';
 import '../../../data/services/hardware_trigger_service.dart';
 import '../../../data/services/session_service.dart';
+import '../../../data/services/app_lock_service.dart';
 import '../../../data/services/biometric_auth_service.dart';
 import 'register_view.dart';
 import '../navigation/main_layout_view.dart';
@@ -136,6 +137,7 @@ class _LoginViewState extends State<LoginView> {
       _enrolledDni = dni;
       _updateBiometricState();
 
+      AppLockService().markJustLoggedIn();
       // Iniciar el servicio nativo de segundo plano sólo tras verificar autenticación
       await HardwareTriggerService().startBackgroundService();
       if (!mounted) return;
@@ -237,6 +239,7 @@ class _LoginViewState extends State<LoginView> {
         idPersona: idPersona,
       );
 
+      AppLockService().markJustLoggedIn();
       await HardwareTriggerService().startBackgroundService();
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
