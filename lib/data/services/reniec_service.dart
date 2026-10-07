@@ -95,6 +95,59 @@ class ReniecService {
   static bool isValidDniFormat(String dni) =>
       RegExp(r'^\d{8}$').hasMatch(dni.trim());
 
+  /// Calcula el Dígito Verificador oficial del DNI según el algoritmo Módulo 11 de RENIEC.
+  /// Ponderación de derecha a izquierda: 2, 3, 4, 5, 6, 7, 2, 3 (o [3, 2, 7, 6, 5, 4, 3, 2] de izq a der).
+  static String? calculateVerificationDigit(String dni) {
+    final clean = dni.trim();
+    if (!isValidDniFormat(clean)) return null;
+    const weights = [3, 2, 7, 6, 5, 4, 3, 2];
+    int sum = 0;
+    for (int i = 0; i < 8; i++) {
+      sum += int.parse(clean[i]) * weights[i];
+    }
+    final remainder = 11 - (sum % 11);
+    if (remainder >= 10) return '0';
+    return remainder.toString();
+  }
+
+  /// Verifica si el dígito verificador ingresado por el ciudadano coincide:
+  /// 1. Con el campo `dv` retornado por RENIEC (si el proveedor lo provee).
+  /// 2. Con el cálculo matemático oficial Módulo 11 de RENIEC.
+  /// 3. Con la equivalencia histórica de letras (K, A, B, C, D, E, F, G, H, I, J) para DNIs antiguos.
+  static bool matchesVerificationDigit({
+    required String dni,
+    required String userDv,
+    String? apiDv,
+  }) {
+    final cleanUserDv = userDv.trim().toUpperCase();
+    if (cleanUserDv.isEmpty) return false;
+
+    // 1. Coincidencia directa con dato provisto por la API
+    if (apiDv != null && apiDv.trim().isNotEmpty) {
+      if (cleanUserDv == apiDv.trim().toUpperCase()) return true;
+    }
+
+    // 2. Coincidencia con algoritmo Módulo 11
+    final calculated = calculateVerificationDigit(dni);
+    if (calculated != null && cleanUserDv == calculated) return true;
+
+    // 3. Coincidencia con letras históricas (DNI anteriores a 2007)
+    if (isValidDniFormat(dni.trim())) {
+      const weights = [3, 2, 7, 6, 5, 4, 3, 2];
+      int sum = 0;
+      for (int i = 0; i < 8; i++) {
+        sum += int.parse(dni.trim()[i]) * weights[i];
+      }
+      final mod = sum % 11;
+      const letters = ['K', 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J'];
+      if (mod >= 0 && mod < letters.length && cleanUserDv == letters[mod]) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   /// Normaliza un texto para el contraste (lado API y lado usuario):
   ///  - minúsculas (.toLowerCase())
   ///  - sin tildes/acentos (á, é, í, ó, ú → vocal sin tilde)

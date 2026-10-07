@@ -109,4 +109,38 @@ void main() {
       expect(ReniecService.isValidDniFormat('7284524a'), isFalse);
     });
   });
+
+  group('ReniecService.calculateVerificationDigit y matchesVerificationDigit', () {
+    test('calcula correctamente el DV según Módulo 11 (ejemplo oficial: 17801146 -> 4)', () {
+      expect(ReniecService.calculateVerificationDigit('17801146'), '4');
+      expect(
+        ReniecService.matchesVerificationDigit(
+          dni: '17801146',
+          userDv: '4',
+        ),
+        isTrue,
+      );
+    });
+
+    test('falla cuando el usuario ingresa un DV incorrecto', () {
+      expect(
+        ReniecService.matchesVerificationDigit(
+          dni: '17801146',
+          userDv: '9',
+        ),
+        isFalse,
+      );
+    });
+
+    test('acepta el DV cuando proviene de la API de RENIEC', () {
+      expect(
+        ReniecService.matchesVerificationDigit(
+          dni: '72845241',
+          userDv: '7',
+          apiDv: '7',
+        ),
+        isTrue,
+      );
+    });
+  });
 }
