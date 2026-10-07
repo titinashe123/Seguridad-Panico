@@ -191,13 +191,40 @@ class _ReportsListViewState extends State<_ReportsListView> {
     }
   }
 
+  Map<String, dynamic> _getStatusConfig(dynamic idEstado, String? rawStatusName) {
+    final id = idEstado is int ? idEstado : int.tryParse(idEstado?.toString() ?? '') ?? 1;
+    final name = rawStatusName?.toString().toLowerCase().trim() ?? '';
+
+    if (id == 3 || name.contains('atendido') || name.contains('resuelto') || name.contains('finalizado')) {
+      return {
+        'color': AppColors.accentGreen,
+        'label': rawStatusName?.isNotEmpty == true ? rawStatusName! : 'Atendido',
+        'icon': Icons.check_circle_rounded,
+      };
+    } else if (id == 2 || name.contains('camino') || name.contains('despach') || name.contains('atendiendo') || name.contains('proceso')) {
+      return {
+        'color': AppColors.accentOrange,
+        'label': rawStatusName?.isNotEmpty == true ? rawStatusName! : 'En camino',
+        'icon': Icons.directions_car_rounded,
+      };
+    } else {
+      // Estado 1 / Pendiente / Enviado a la espera
+      return {
+        'color': AppColors.primaryRed,
+        'label': rawStatusName?.isNotEmpty == true && rawStatusName != 'Enviado' ? rawStatusName! : 'Pendiente',
+        'icon': Icons.access_time_rounded,
+      };
+    }
+  }
+
   void _showReportDetails(Map<String, dynamic> item) {
     final typeName = item['tipo_incidencia']?['nombre'] ?? 'EMERGENCIA';
     final idEstado = item['id_estado'];
-    final statusName = item['estado_reporte']?['nombre'] ?? (idEstado == 1 ? 'Enviado' : 'No enviado');
-    final isSent = idEstado == 1 || statusName.toString().toLowerCase() == 'enviado';
-    final statusColor = isSent ? AppColors.accentGreen : AppColors.primaryRed;
-    final statusIcon = isSent ? Icons.check_circle : Icons.cloud_off_rounded;
+    final rawStatusName = item['estado_reporte']?['nombre']?.toString();
+    final statusConfig = _getStatusConfig(idEstado, rawStatusName);
+    final statusColor = statusConfig['color'] as Color;
+    final statusName = statusConfig['label'] as String;
+    final statusIcon = statusConfig['icon'] as IconData;
     final dateStr = _formatDate(item['fecha_hora']);
     final desc = item['descripcion'] ?? 'Sin descripción';
     final address = item['direccion_texto'] ?? 'Ubicación móvil GPS';
@@ -443,9 +470,11 @@ class _ReportsListViewState extends State<_ReportsListView> {
                           final item = _reports[index];
                           final typeName = item['tipo_incidencia']?['nombre'] ?? 'EMERGENCIA';
                           final idEstado = item['id_estado'];
-                          final statusName = item['estado_reporte']?['nombre'] ?? (idEstado == 1 ? 'Enviado' : 'No enviado');
-                          final isSent = idEstado == 1 || statusName.toString().toLowerCase() == 'enviado';
-                          final statusColor = isSent ? AppColors.accentGreen : AppColors.primaryRed;
+                          final rawStatusName = item['estado_reporte']?['nombre']?.toString();
+                          final statusConfig = _getStatusConfig(idEstado, rawStatusName);
+                          final statusColor = statusConfig['color'] as Color;
+                          final statusName = statusConfig['label'] as String;
+                          final statusIcon = statusConfig['icon'] as IconData;
                           final badgeColor = _getBadgeColor(typeName);
                           final dateText = _formatDate(item['fecha_hora']);
                           final desc = item['descripcion'] ?? 'Sin descripción';
@@ -461,7 +490,7 @@ class _ReportsListViewState extends State<_ReportsListView> {
                                 color: AppColors.surface,
                                 borderRadius: BorderRadius.circular(12),
                                 border: Border.all(
-                                  color: isSent ? AppColors.border : AppColors.primaryRed.withValues(alpha: 0.4),
+                                  color: statusColor.withValues(alpha: 0.35),
                                 ),
                               ),
                               child: Column(
@@ -526,15 +555,8 @@ class _ReportsListViewState extends State<_ReportsListView> {
                                       ),
                                       Row(
                                         children: [
-                                          Container(
-                                            width: 7,
-                                            height: 7,
-                                            decoration: BoxDecoration(
-                                              shape: BoxShape.circle,
-                                              color: statusColor,
-                                            ),
-                                          ),
-                                          const SizedBox(width: 6),
+                                          Icon(statusIcon, size: 12, color: statusColor),
+                                          const SizedBox(width: 5),
                                           Text(
                                             statusName,
                                             style: GoogleFonts.inter(

@@ -28,6 +28,10 @@ class AppLockService {
   /// (que produce eventos pause/resume transitorios en Android) provoque un bucle de bloqueo.
   bool isAuthenticatingBiometrics = false;
 
+  /// Bandera para evitar que los diálogos de permisos del sistema operativo (GPS, cámara, etc.)
+  /// provoquen un bloqueo transitorio indeseado.
+  bool isSystemDialogActive = false;
+
   /// Bandera para evitar bloquear la app en el instante en que el usuario
   /// acaba de iniciar sesión o registrarse desde LoginView.
   bool justLoggedIn = false;
@@ -119,7 +123,7 @@ class AppLockService {
 
   /// Se ejecuta cuando la aplicación pasa a segundo plano o se bloquea la pantalla
   void onAppPaused() {
-    if (isAuthenticatingBiometrics) return;
+    if (isAuthenticatingBiometrics || isSystemDialogActive) return;
     if (justUnlocked) return;
     _cancelInactivityTimer();
     _pausedAt = DateTime.now();
@@ -128,7 +132,7 @@ class AppLockService {
 
   /// Se ejecuta cuando la aplicación regresa a primer plano
   Future<void> onAppResumed() async {
-    if (isAuthenticatingBiometrics) return;
+    if (isAuthenticatingBiometrics || isSystemDialogActive) return;
     if (justLoggedIn) return;
     if (justUnlocked) {
       _pausedAt = null;

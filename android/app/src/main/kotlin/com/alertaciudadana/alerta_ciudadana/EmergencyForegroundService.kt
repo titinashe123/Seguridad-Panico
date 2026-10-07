@@ -72,6 +72,11 @@ class EmergencyForegroundService : Service() {
     private var lastCurrentLinearMag: Float = 0f
     private var lastCurrentGyroMag: Float = 0f
 
+    // Control de corrección satelital y transmisión continua en vivo con pantalla apagada
+    private var hasCorrectedInitialReportLocation: Boolean = false
+    private var liveTrackingHandler: android.os.Handler? = null
+    private var liveTrackingRunnable: Runnable? = null
+
     // WakeLock para garantizar ejecución continua de CPU y sensores con pantalla apagada / Doze Mode
     private var emergencyWakeLock: PowerManager.WakeLock? = null
 
@@ -123,6 +128,7 @@ class EmergencyForegroundService : Service() {
         var currentEmergencyAlertType: String = "ROBO"
         var emergencyTriggerTimestamp: Long = 0
         var isEmergencyDispatched: Boolean = false
+        var activeEmergencyReportId: Long? = null
 
         fun isUserLoggedIn(context: Context): Boolean {
             return try {
@@ -242,6 +248,36 @@ class EmergencyForegroundService : Service() {
             isEmergencyActive = false
             isEmergencyDispatched = false
 
+            // Si hay un reporte activo, notificar marcador (0.0, 0.0) de cierre a Supabase
+            activeEmergencyReportId?.let { repId ->
+                Thread {
+                    try {
+                        val supabaseUrl = URL("https://emtzprcntefzkvvzmhfk.supabase.co/rest/v1/ubicacion")
+                        val conn = supabaseUrl.openConnection() as HttpURLConnection
+                        conn.requestMethod = "POST"
+                        conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                        conn.setRequestProperty("apikey", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
+                        conn.setRequestProperty("Authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
+                        conn.connectTimeout = 4000
+                        conn.readTimeout = 4000
+                        conn.doOutput = true
+                        val sBody = JSONObject().apply {
+                            put("id_reporte", repId)
+                            put("latitud", 0.0)
+                            put("longitud", 0.0)
+                        }
+                        val bytes = sBody.toString().toByteArray(Charsets.UTF_8)
+                        conn.outputStream.use { os ->
+                            os.write(bytes)
+                            os.flush()
+                        }
+                        conn.responseCode
+                        conn.disconnect()
+                    } catch (_: Exception) {}
+                }.start()
+            }
+            activeEmergencyReportId = null
+
             // Enviar orden inmediata de fin de rastreo y restauración de notificación al servicio
             try {
                 val intent = Intent(context, EmergencyForegroundService::class.java).apply {
@@ -302,7 +338,11 @@ class EmergencyForegroundService : Service() {
             ACTION_SET_TRACKING -> {
                 isLiveTrackingActive = intent.getBooleanExtra(EXTRA_IS_TRACKING, false)
                 if (!isLiveTrackingActive) {
+                    stopNativeLiveTrackingLoop()
                     stopHighAccuracyGpsLock()
+                    hasCorrectedInitialReportLocation = false
+                } else {
+                    startNativeLiveTrackingLoop()
                 }
                 val notification = buildCurrentNotification()
                 val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
@@ -828,16 +868,25 @@ class EmergencyForegroundService : Service() {
             // 3. Suscribir listeners de máxima prioridad (0ms, 0m) en todos los proveedores disponibles
             val listener = object : LocationListener {
                 override fun onLocationChanged(loc: Location) {
-                    activeLocation = loc
+                    if (activeLocation == null || loc.accuracy <= (activeLocation!!.accuracy + 15f) || loc.accuracy <= 40f) {
+                        activeLocation = loc
+                    }
                     android.util.Log.i("EmergencyService", "🎯 Fix GPS activo fijado [${loc.provider}]: Lat ${loc.latitude}, Lon ${loc.longitude}, Precisión: ±${loc.accuracy}m")
-                    try {
-                        val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-                        prefs.edit()
-                            .putString("flutter.last_known_real_lat", loc.latitude.toString())
-                            .putString("flutter.last_known_real_lon", loc.longitude.toString())
-                            .putLong("flutter.last_known_real_time", System.currentTimeMillis())
-                            .apply()
-                    } catch (_: Exception) {}
+                    if (loc.accuracy <= 70f) {
+                        try {
+                            val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                            prefs.edit()
+                                .putString("flutter.last_known_real_lat", loc.latitude.toString())
+                                .putString("flutter.last_known_real_lon", loc.longitude.toString())
+                                .putLong("flutter.last_known_real_time", System.currentTimeMillis())
+                                .apply()
+                        } catch (_: Exception) {}
+
+                        // Si ya se despachó el reporte con ubicación previa/celular, corregirlo inmediatamente con el satélite
+                        activeEmergencyReportId?.let { reportId ->
+                            patchNativeReportLocationIfBetter(reportId, loc)
+                        }
+                    }
                 }
                 override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
                 override fun onProviderEnabled(provider: String) {}
@@ -856,6 +905,10 @@ class EmergencyForegroundService : Service() {
     }
 
     private fun stopHighAccuracyGpsLock() {
+        if (isEmergencyActive || isLiveTrackingActive) {
+            // No apagar el hardware satelital si la emergencia o el rastreo en vivo están en progreso
+            return
+        }
         try {
             activeEmergencyLocationListener?.let {
                 val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
@@ -863,9 +916,7 @@ class EmergencyForegroundService : Service() {
             }
         } catch (_: Exception) {}
         activeEmergencyLocationListener = null
-        if (!isEmergencyActive && !isLiveTrackingActive) {
-            releaseEmergencyWakeLock()
-        }
+        releaseEmergencyWakeLock()
     }
 
     private fun onRapidPowerPressDetected() {
@@ -1064,8 +1115,7 @@ class EmergencyForegroundService : Service() {
             var nativeSuccess = false
             var createdReportId: Long? = null
             try {
-                // 1. Obtener última y mejor ubicación GPS (priorizando la fijación satelital activa en tiempo real)
-                stopHighAccuracyGpsLock()
+                // 1. Obtener última y mejor ubicación GPS (manteniendo la fijación satelital activa)
                 var bestLocation: Location? = activeLocation
                 val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
                 if (bestLocation == null || (System.currentTimeMillis() - bestLocation.time > 15000)) {
@@ -1109,8 +1159,26 @@ class EmergencyForegroundService : Service() {
                 } catch (_: Exception) { null }
                 val cachedRealAddress = try { prefs.getString("flutter.last_known_real_address", null) } catch (_: Exception) { null }
 
-                val lat = bestLocation?.latitude ?: cachedRealLat ?: -13.71450
-                val lon = bestLocation?.longitude ?: cachedRealLon ?: -76.20320
+                // REGLA FUNDAMENTAL DE PRECISIÓN:
+                // Si bestLocation proviene de una celda celular (accuracy > 70m) y disponemos de la
+                // última ubicación satelital verificada del usuario en SharedPreferences, se prioriza
+                // la posición satelital real del ciudadano para evitar saltos falsos a antenas lejanas (ej. Pedemonte).
+                val lat: Double
+                val lon: Double
+                if (bestLocation != null && bestLocation.accuracy <= 70f) {
+                    lat = bestLocation.latitude
+                    lon = bestLocation.longitude
+                } else if (cachedRealLat != null && cachedRealLon != null) {
+                    lat = cachedRealLat
+                    lon = cachedRealLon
+                    android.util.Log.i("EmergencyService", "🛰️ Descartando celda celular imprecisa (>70m). Usando última ubicación satelital verificada: Lat $lat, Lon $lon")
+                } else if (bestLocation != null) {
+                    lat = bestLocation.latitude
+                    lon = bestLocation.longitude
+                } else {
+                    lat = -13.71450
+                    lon = -76.20320
+                }
 
                 // Resolver dirección y calle exacta mediante el Geocoder nativo
                 var realAddress = cachedRealAddress ?: "Pisco, Ica - Ubicación móvil"
@@ -1271,6 +1339,9 @@ class EmergencyForegroundService : Service() {
                             val jsonArr = org.json.JSONArray(sResText)
                             if (jsonArr.length() > 0) {
                                 createdReportId = jsonArr.getJSONObject(0).optLong("id_reporte")
+                                activeEmergencyReportId = createdReportId
+                                // Inserción inmediata del punto inicial en la tabla 'ubicacion' de Supabase
+                                sendNativeLocationPointToSupabase(createdReportId!!, lat, lon)
                             }
                         } catch (_: Exception) {}
                     }
@@ -1332,6 +1403,7 @@ class EmergencyForegroundService : Service() {
                 // 7. Activar rastreo en vivo si es ROBO
                 if (alertType == "ROBO") {
                     isLiveTrackingActive = true
+                    startNativeLiveTrackingLoop()
                     val notif = buildCurrentNotification()
                     val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
                     manager?.notify(NOTIFICATION_ID, notif)
@@ -1415,8 +1487,147 @@ class EmergencyForegroundService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
+    private fun sendNativeLocationPointToSupabase(reportId: Long, lat: Double, lon: Double) {
+        Thread {
+            try {
+                val df = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US).apply {
+                    timeZone = TimeZone.getTimeZone("UTC")
+                }
+                val nowUtcIso = df.format(Date())
+
+                val supabaseUrl = URL("https://emtzprcntefzkvvzmhfk.supabase.co/rest/v1/ubicacion")
+                val conn = supabaseUrl.openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                conn.setRequestProperty("apikey", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
+                conn.setRequestProperty("Authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
+                conn.connectTimeout = 6000
+                conn.readTimeout = 6000
+                conn.doOutput = true
+
+                val sBody = JSONObject().apply {
+                    put("id_reporte", reportId)
+                    put("latitud", lat)
+                    put("longitud", lon)
+                    put("fecha_hora", nowUtcIso)
+                }
+                val sBytes = sBody.toString().toByteArray(Charsets.UTF_8)
+                conn.setFixedLengthStreamingMode(sBytes.size)
+                conn.outputStream.use { os ->
+                    os.write(sBytes)
+                    os.flush()
+                }
+                val code = conn.responseCode
+                android.util.Log.d("EmergencyForegroundService", "🛰️ Punto de rastreo en vivo transmitido nativo a Supabase ($code): Lat $lat, Lon $lon")
+                conn.disconnect()
+            } catch (e: Exception) {
+                android.util.Log.e("EmergencyForegroundService", "Error enviando punto nativo a Supabase: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun patchNativeReportLocationIfBetter(reportId: Long, loc: Location) {
+        if (hasCorrectedInitialReportLocation) return
+        if (loc.accuracy > 45f) return
+        hasCorrectedInitialReportLocation = true
+        Thread {
+            try {
+                var updatedAddress = "Ubicación móvil GPS (±${String.format(Locale.US, "%.1f", loc.accuracy)}m)"
+                try {
+                    if (Geocoder.isPresent()) {
+                        val geocoder = Geocoder(this, Locale("es", "PE"))
+                        @Suppress("DEPRECATION")
+                        val addresses = geocoder.getFromLocation(loc.latitude, loc.longitude, 1)
+                        if (!addresses.isNullOrEmpty()) {
+                            val addr = addresses[0]
+                            val thoroughfare = addr.thoroughfare
+                            val subThoroughfare = addr.subThoroughfare
+                            val locality = addr.locality ?: addr.subAdminArea ?: "Pisco"
+                            if (!thoroughfare.isNullOrBlank()) {
+                                updatedAddress = if (!subThoroughfare.isNullOrBlank()) {
+                                    "$thoroughfare $subThoroughfare, $locality (±${String.format(Locale.US, "%.1f", loc.accuracy)}m)"
+                                } else {
+                                    "$thoroughfare, $locality (±${String.format(Locale.US, "%.1f", loc.accuracy)}m)"
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {}
+
+                val patchUrl = URL("https://emtzprcntefzkvvzmhfk.supabase.co/rest/v1/reporte?id_reporte=eq.$reportId")
+                val conn = patchUrl.openConnection() as HttpURLConnection
+                conn.requestMethod = "PATCH"
+                conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                conn.setRequestProperty("apikey", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
+                conn.setRequestProperty("Authorization", "Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVtdHpwcmNudGVmemt2dnptaGZrIiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTA3ODIxNzIsImV4cCI6MjEwNjM1ODE3Mn0.x18Bh68n4ZgtNOyVPwIc01V6aL50oUaXjeXELzlWEh4")
+                conn.connectTimeout = 6000
+                conn.readTimeout = 6000
+                conn.doOutput = true
+
+                val patchBody = JSONObject().apply {
+                    put("latitud", loc.latitude)
+                    put("longitud", loc.longitude)
+                    put("direccion_texto", updatedAddress)
+                }
+                val patchBytes = patchBody.toString().toByteArray(Charsets.UTF_8)
+                conn.setFixedLengthStreamingMode(patchBytes.size)
+                conn.outputStream.use { os ->
+                    os.write(patchBytes)
+                    os.flush()
+                }
+                val patchCode = conn.responseCode
+                android.util.Log.i("EmergencyForegroundService", "🎯 Reporte inicial corregido con fix satelital de alta precisión ($patchCode): Lat ${loc.latitude}, Lon ${loc.longitude}")
+                conn.disconnect()
+
+                // Enviar también como punto de rastreo a la tabla de ubicación
+                sendNativeLocationPointToSupabase(reportId, loc.latitude, loc.longitude)
+            } catch (e: Exception) {
+                android.util.Log.e("EmergencyForegroundService", "Error actualizando reporte con fix satelital: ${e.message}")
+            }
+        }.start()
+    }
+
+    private fun startNativeLiveTrackingLoop() {
+        stopNativeLiveTrackingLoop()
+        acquireEmergencyWakeLock(120000L)
+        liveTrackingHandler = android.os.Handler(Looper.getMainLooper())
+        liveTrackingRunnable = object : Runnable {
+            override fun run() {
+                if (!isLiveTrackingActive) return
+                acquireEmergencyWakeLock(60000L)
+                val reportId = activeEmergencyReportId
+                val loc = activeLocation
+                if (reportId != null) {
+                    val lat = if (loc != null && loc.accuracy <= 70f) loc.latitude else null
+                    val lon = if (loc != null && loc.accuracy <= 70f) loc.longitude else null
+                    if (lat != null && lon != null) {
+                        sendNativeLocationPointToSupabase(reportId, lat, lon)
+                    } else {
+                        val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                        val cachedLat = prefs.all["flutter.last_known_real_lat"]?.toString()?.toDoubleOrNull()
+                        val cachedLon = prefs.all["flutter.last_known_real_lon"]?.toString()?.toDoubleOrNull()
+                        if (cachedLat != null && cachedLon != null) {
+                            sendNativeLocationPointToSupabase(reportId, cachedLat, cachedLon)
+                        } else if (loc != null) {
+                            sendNativeLocationPointToSupabase(reportId, loc.latitude, loc.longitude)
+                        }
+                    }
+                }
+                liveTrackingHandler?.postDelayed(this, 5000L)
+            }
+        }
+        liveTrackingHandler?.postDelayed(liveTrackingRunnable!!, 3000L)
+    }
+
+    private fun stopNativeLiveTrackingLoop() {
+        liveTrackingHandler?.removeCallbacksAndMessages(null)
+        liveTrackingHandler = null
+        liveTrackingRunnable = null
+    }
+
     override fun onDestroy() {
         isServiceRunning = false
+        stopNativeLiveTrackingLoop()
         releaseEmergencyWakeLock()
         screenReceiver?.let {
             try {

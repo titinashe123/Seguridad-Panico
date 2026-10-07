@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/theme/app_theme.dart';
+import 'app_lock_service.dart';
 
 /// Servicio para obtención de ubicación GPS exacta en tiempo real del dispositivo
 class GpsLocationService {
@@ -285,19 +286,26 @@ class GpsLocationService {
       );
 
       if (userWantsToAllow == true) {
-        if (permission == LocationPermission.deniedForever) {
-          await Geolocator.openAppSettings();
-          return false;
-        }
-
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
-          if (!serviceEnabled && context.mounted) {
-            _showEnableGpsDialog(context);
-          } else {
-            getCurrentLocation(); // Pre-calentar satélites
+        AppLockService().isSystemDialogActive = true;
+        try {
+          if (permission == LocationPermission.deniedForever) {
+            await Geolocator.openAppSettings();
+            return false;
           }
-          return true;
+
+          permission = await Geolocator.requestPermission();
+          if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+            if (!serviceEnabled && context.mounted) {
+              _showEnableGpsDialog(context);
+            } else {
+              getCurrentLocation(); // Pre-calentar satélites
+            }
+            return true;
+          }
+        } finally {
+          await Future.delayed(const Duration(milliseconds: 600));
+          AppLockService().isSystemDialogActive = false;
+          AppLockService().recordUserActivity();
         }
       }
     } catch (e) {
@@ -344,9 +352,16 @@ class GpsLocationService {
             child: Text('Cancelar', style: GoogleFonts.inter(color: AppColors.textMuted)),
           ),
           ElevatedButton(
-            onPressed: () {
+            onPressed: () async {
               Navigator.of(ctx).pop();
-              Geolocator.openLocationSettings();
+              AppLockService().isSystemDialogActive = true;
+              try {
+                await Geolocator.openLocationSettings();
+              } finally {
+                await Future.delayed(const Duration(milliseconds: 600));
+                AppLockService().isSystemDialogActive = false;
+                AppLockService().recordUserActivity();
+              }
             },
             style: ElevatedButton.styleFrom(backgroundColor: AppColors.accentGreen),
             child: Text('Activar GPS', style: GoogleFonts.inter(color: Colors.black, fontWeight: FontWeight.w700)),
