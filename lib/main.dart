@@ -55,19 +55,25 @@ class _AlertaCiudadanaAppState extends State<AlertaCiudadanaApp> with WidgetsBin
       theme: AppTheme.darkTheme,
       home: widget.isLoggedIn ? const MainLayoutView() : const LoginView(),
       builder: (context, child) {
-        return ValueListenableBuilder<bool>(
-          valueListenable: AppLockService().isLockedNotifier,
-          builder: (context, isLocked, _) {
-            return Stack(
-              children: [
-                child ?? const SizedBox.shrink(),
-                if (isLocked)
-                  const Positioned.fill(
-                    child: SecurityUnlockView(),
-                  ),
-              ],
-            );
-          },
+        return Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (_) => AppLockService().recordUserActivity(),
+          onPointerMove: (_) => AppLockService().recordUserActivity(),
+          onPointerUp: (_) => AppLockService().recordUserActivity(),
+          child: ValueListenableBuilder<bool>(
+            valueListenable: AppLockService().isLockedNotifier,
+            builder: (context, isLocked, _) {
+              return Stack(
+                children: [
+                  child ?? const SizedBox.shrink(),
+                  if (isLocked)
+                    const Positioned.fill(
+                      child: SecurityUnlockView(),
+                    ),
+                ],
+              );
+            },
+          ),
         );
       },
     );
