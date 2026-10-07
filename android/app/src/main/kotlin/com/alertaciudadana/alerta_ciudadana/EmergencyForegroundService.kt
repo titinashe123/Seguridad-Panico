@@ -173,26 +173,34 @@ class EmergencyForegroundService : Service() {
         }
 
         fun startService(context: Context) {
-            if (!isUserLoggedIn(context)) return
-            val intent = Intent(context, EmergencyForegroundService::class.java).apply {
-                action = ACTION_START_GUARD
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                if (!isUserLoggedIn(context)) return
+                val intent = Intent(context, EmergencyForegroundService::class.java).apply {
+                    action = ACTION_START_GUARD
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("EmergencyService", "No se pudo iniciar startForegroundService: ${e.message}")
             }
         }
 
         fun updateTrackingStatus(context: Context, isTracking: Boolean) {
-            val intent = Intent(context, EmergencyForegroundService::class.java).apply {
-                action = ACTION_SET_TRACKING
-                putExtra(EXTRA_IS_TRACKING, isTracking)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                val intent = Intent(context, EmergencyForegroundService::class.java).apply {
+                    action = ACTION_SET_TRACKING
+                    putExtra(EXTRA_IS_TRACKING, isTracking)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("EmergencyService", "No se pudo actualizar estado de rastreo: ${e.message}")
             }
         }
 
@@ -275,8 +283,12 @@ class EmergencyForegroundService : Service() {
         registerSensorListener()
         registerLocationListener()
 
-        val notification = buildCurrentNotification()
-        startForeground(NOTIFICATION_ID, notification)
+        try {
+            val notification = buildCurrentNotification()
+            startForeground(NOTIFICATION_ID, notification)
+        } catch (e: Exception) {
+            android.util.Log.e("EmergencyService", "Error en startForeground: ${e.message}")
+        }
 
         return START_STICKY
     }

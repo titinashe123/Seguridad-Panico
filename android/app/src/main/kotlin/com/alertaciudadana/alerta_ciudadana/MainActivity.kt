@@ -32,8 +32,12 @@ class MainActivity : FlutterFragmentActivity() {
         applyLockScreenFlags(false)
 
         // Solo iniciar el servicio en primer plano si el usuario ha iniciado sesión
-        if (EmergencyForegroundService.isUserLoggedIn(this)) {
-            EmergencyForegroundService.startService(applicationContext)
+        try {
+            if (EmergencyForegroundService.isUserLoggedIn(this)) {
+                EmergencyForegroundService.startService(applicationContext)
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("MainActivity", "Error iniciando servicio: ${e.message}")
         }
 
         checkIntentExtras(intent)
