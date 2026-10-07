@@ -28,7 +28,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
-        setupLockScreenFlags()
+        clearLockScreenFlags()
 
         // Solo iniciar el servicio en primer plano si el usuario ha iniciado sesión
         if (EmergencyForegroundService.isUserLoggedIn(this)) {
@@ -38,15 +38,13 @@ class MainActivity : FlutterFragmentActivity() {
         checkIntentExtras(intent)
     }
 
-    private fun setupLockScreenFlags() {
+    private fun clearLockScreenFlags() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
-            val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
-            keyguardManager?.requestDismissKeyguard(this, null)
+            setShowWhenLocked(false)
+            setTurnScreenOn(false)
         }
         @Suppress("DEPRECATION")
-        window.addFlags(
+        window.clearFlags(
             WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
             WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
             WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
@@ -56,13 +54,13 @@ class MainActivity : FlutterFragmentActivity() {
 
     override fun onResume() {
         super.onResume()
-        setupLockScreenFlags()
+        clearLockScreenFlags()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        setupLockScreenFlags()
+        clearLockScreenFlags()
         checkIntentExtras(intent)
     }
 

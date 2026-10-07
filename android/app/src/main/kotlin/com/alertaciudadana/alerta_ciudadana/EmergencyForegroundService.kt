@@ -1,6 +1,7 @@
 package com.alertaciudadana.alerta_ciudadana
 
 import android.app.AlarmManager
+import android.app.KeyguardManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -594,22 +595,10 @@ class EmergencyForegroundService : Service() {
                 .apply()
         } catch (_: Exception) {}
 
-        // 1. Despacho INMEDIATO a la app viva (si ya está abierta)
-        try {
-            MainActivity.instance?.triggerPanicFromNative(source, alertType)
-        } catch (_: Exception) {}
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val isDeviceLocked = keyguardManager?.isKeyguardLocked ?: false
 
-        // 2. Despertar pantalla con WakeLock inmediatamente
-        try {
-            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
-            val wakeLock = powerManager?.newWakeLock(
-                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "AlertaCiudadana:PanicWakeLock"
-            )
-            wakeLock?.acquire(15000L)
-        } catch (_: Exception) {}
-
-        // 3. Crear Intent directo y lanzar actividad inmediatamente al frente
+        // 1. Crear Intent para la actividad
         val fullScreenIntent = Intent(this, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
                     Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
@@ -626,11 +615,27 @@ class EmergencyForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        try {
-            startActivity(fullScreenIntent)
-        } catch (_: Exception) {}
+        // 2. Si el dispositivo NO está bloqueado, interactuar con la app viva
+        if (!isDeviceLocked) {
+            try {
+                MainActivity.instance?.triggerPanicFromNative(source, alertType)
+            } catch (_: Exception) {}
 
-        // 4. Vibración táctil de confirmación en el bolsillo
+            try {
+                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+                val wakeLock = powerManager?.newWakeLock(
+                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                    "AlertaCiudadana:PanicWakeLock"
+                )
+                wakeLock?.acquire(15000L)
+            } catch (_: Exception) {}
+
+            try {
+                startActivity(fullScreenIntent)
+            } catch (_: Exception) {}
+        }
+
+        // 3. Vibración táctil de confirmación en el bolsillo
         try {
             val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -641,10 +646,10 @@ class EmergencyForegroundService : Service() {
             }
         } catch (_: Exception) {}
 
-        // 5. Iniciar la notificación con cuenta regresiva (5 segundos)
+        // 4. Iniciar la notificación con cuenta regresiva (5 segundos)
         updateEmergencyNotificationCountdown(5, alertType, fullScreenPendingIntent)
 
-        // 6. Iniciar temporizador nativo de 5 segundos
+        // 5. Iniciar temporizador nativo de 5 segundos
         activeCountdownTimer?.cancel()
         activeCountdownTimer = object : CountDownTimer(5000, 1000) {
             override fun onTick(millisUntilFinished: Long) {
@@ -666,6 +671,9 @@ class EmergencyForegroundService : Service() {
     }
 
     private fun updateEmergencyNotificationCountdown(secondsLeft: Long, alertType: String, fullScreenPendingIntent: PendingIntent) {
+        val keyguardManager = getSystemService(Context.KEYGUARD_SERVICE) as? KeyguardManager
+        val isDeviceLocked = keyguardManager?.isKeyguardLocked ?: false
+
         val smallIcon = applicationInfo.icon.takeIf { it != 0 } ?: android.R.drawable.ic_lock_idle_alarm
         val title = if (alertType == "ACCIDENTE") {
             "🚗 ¡ACCIDENTE DETECTADO! ($secondsLeft seg)"
@@ -674,15 +682,13 @@ class EmergencyForegroundService : Service() {
         }
         val text = "Despachando alerta en $secondsLeft segundos. Toca para ingresar PIN y cancelar."
 
-        val alarmNotification = NotificationCompat.Builder(this, EMERGENCY_ALARM_CHANNEL_ID)
+        val builder = NotificationCompat.Builder(this, EMERGENCY_ALARM_CHANNEL_ID)
             .setSmallIcon(smallIcon)
             .setContentTitle(title)
             .setContentText(text)
             .setStyle(NotificationCompat.BigTextStyle().bigText("$text\nSi fue una falsa alarma, ingresa tu PIN."))
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setCategory(NotificationCompat.CATEGORY_ALARM)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setFullScreenIntent(fullScreenPendingIntent, true)
             .setOngoing(false)
             .setAutoCancel(true)
             .setContentIntent(fullScreenPendingIntent)
@@ -691,10 +697,17 @@ class EmergencyForegroundService : Service() {
                 "❌ CANCELAR CON PIN",
                 fullScreenPendingIntent
             )
-            .build()
+
+        if (isDeviceLocked) {
+            // Modo Sigiloso: en la pantalla de bloqueo NO se expone la alerta ni se lanza la pantalla completa
+            builder.setVisibility(NotificationCompat.VISIBILITY_SECRET)
+        } else {
+            builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            builder.setFullScreenIntent(fullScreenPendingIntent, true)
+        }
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
-        notificationManager?.notify(PANIC_NOTIFICATION_ID, alarmNotification)
+        notificationManager?.notify(PANIC_NOTIFICATION_ID, builder.build())
     }
 
     private fun dispatchEmergencyAlertFromService(source: String, alertType: String) {
