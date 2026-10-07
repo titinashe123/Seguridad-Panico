@@ -72,6 +72,38 @@ class EmergencyForegroundService : Service() {
     private var lastCurrentLinearMag: Float = 0f
     private var lastCurrentGyroMag: Float = 0f
 
+    // WakeLock para garantizar ejecución continua de CPU y sensores con pantalla apagada / Doze Mode
+    private var emergencyWakeLock: PowerManager.WakeLock? = null
+
+    private fun acquireEmergencyWakeLock(timeoutMs: Long = 35000L) {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            if (emergencyWakeLock == null) {
+                emergencyWakeLock = pm?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "AlertaCiudadana:EmergencyCpuLock")
+            }
+            emergencyWakeLock?.let { wl ->
+                if (wl.isHeld) {
+                    try { wl.release() } catch (_: Exception) {}
+                }
+                wl.acquire(timeoutMs)
+                android.util.Log.i("EmergencyService", "🔋 WakeLock de CPU activo ($timeoutMs ms) para forzado de hardware con pantalla apagada")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("EmergencyService", "Error adquiriendo WakeLock de CPU: ${e.message}")
+        }
+    }
+
+    private fun releaseEmergencyWakeLock() {
+        try {
+            emergencyWakeLock?.let { wl ->
+                if (wl.isHeld) {
+                    wl.release()
+                    android.util.Log.i("EmergencyService", "🔋 WakeLock de CPU liberado")
+                }
+            }
+        } catch (_: Exception) {}
+    }
+
     companion object {
         const val CHANNEL_ID = "alerta_ciudadana_protection_channel"
         const val EMERGENCY_ALARM_CHANNEL_ID = "alerta_ciudadana_emergency_alarm"
@@ -577,13 +609,13 @@ class EmergencyForegroundService : Service() {
                         // Capturar ubicación GPS inicial
                         val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
                         candidateStartLocation = try {
-                            val gps = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                            val net = locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                            when {
-                                gps != null && net != null -> if (gps.time > net.time) gps else net
-                                gps != null -> gps
-                                else -> net
+                            val available = locationManager?.getProviders(true) ?: emptyList<String>()
+                            var newest: Location? = null
+                            for (p in available) {
+                                val l = locationManager?.getLastKnownLocation(p)
+                                if (l != null && (newest == null || l.time > newest.time)) newest = l
                             }
+                            newest
                         } catch (_: Exception) { null }
 
                         escapeVerificationHandler?.removeCallbacksAndMessages(null)
@@ -622,13 +654,13 @@ class EmergencyForegroundService : Service() {
         val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
         var endLocation: Location? = null
         try {
-            val gps = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-            val net = locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-            endLocation = when {
-                gps != null && net != null -> if (gps.time > net.time) gps else net
-                gps != null -> gps
-                else -> net
+            val available = locationManager?.getProviders(true) ?: emptyList<String>()
+            var newest: Location? = null
+            for (p in available) {
+                val l = locationManager?.getLastKnownLocation(p)
+                if (l != null && (newest == null || l.time > newest.time)) newest = l
             }
+            endLocation = newest
         } catch (_: Exception) {}
 
         val distanceMoved = if (candidateStartLocation != null && endLocation != null) {
@@ -731,34 +763,73 @@ class EmergencyForegroundService : Service() {
 
     private fun forceHighAccuracyGpsLock() {
         try {
+            // 0. Forzar que la CPU y los módulos de radio/sensores no se duerman con pantalla apagada
+            acquireEmergencyWakeLock(35000L)
+
             val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
-            
-            // 1. Obtener de inmediato la última posición conocida del sistema si está disponible
+            val availableProviders = try { lm.getProviders(true) } catch (_: Exception) { emptyList<String>() }
+
+            // 1. Obtener de inmediato la posición más reciente de TODOS los proveedores disponibles (fused, gps, network, passive)
             try {
-                val gpsLoc = if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) else null
-                val netLoc = if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) else null
-                val immediateCandidate = when {
-                    gpsLoc != null && netLoc != null -> if (gpsLoc.time > netLoc.time) gpsLoc else netLoc
-                    gpsLoc != null -> gpsLoc
-                    else -> netLoc
+                var newestCandidate: Location? = null
+                for (prov in availableProviders) {
+                    try {
+                        val loc = lm.getLastKnownLocation(prov)
+                        if (loc != null) {
+                            if (newestCandidate == null || loc.time > newestCandidate.time) {
+                                newestCandidate = loc
+                            }
+                        }
+                    } catch (_: SecurityException) {} catch (_: Exception) {}
                 }
-                if (immediateCandidate != null) {
-                    if (activeLocation == null || immediateCandidate.time > activeLocation!!.time) {
-                        activeLocation = immediateCandidate
-                        android.util.Log.i("EmergencyService", "⚡ Posición GPS inicial inmediata disponible: Lat ${immediateCandidate.latitude}, Lon ${immediateCandidate.longitude} (antigüedad ${(System.currentTimeMillis() - immediateCandidate.time)/1000}s)")
+                if (newestCandidate != null) {
+                    if (activeLocation == null || newestCandidate.time > activeLocation!!.time) {
+                        activeLocation = newestCandidate
+                        android.util.Log.i("EmergencyService", "⚡ Posición GPS inicial inmediata disponible [${newestCandidate.provider}]: Lat ${newestCandidate.latitude}, Lon ${newestCandidate.longitude} (antigüedad ${(System.currentTimeMillis() - newestCandidate.time)/1000}s, ±${newestCandidate.accuracy}m)")
                     }
                 }
             } catch (_: Exception) {}
+
+            // 2. Forzar lectura activa directa al hardware con lm.getCurrentLocation (Android 11+ / API 30+)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val executor = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    mainExecutor
+                } else {
+                    java.util.concurrent.Executor { r -> android.os.Handler(Looper.getMainLooper()).post(r) }
+                }
+
+                for (prov in availableProviders) {
+                    try {
+                        lm.getCurrentLocation(prov, null, executor) { loc ->
+                            if (loc != null) {
+                                if (activeLocation == null || loc.time >= activeLocation!!.time || loc.accuracy <= activeLocation!!.accuracy) {
+                                    activeLocation = loc
+                                    android.util.Log.i("EmergencyService", "🎯 Forzado activo a hardware getCurrentLocation [$prov]: Lat ${loc.latitude}, Lon ${loc.longitude}, Precisión: ±${loc.accuracy}m")
+                                    try {
+                                        val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                                        prefs.edit()
+                                            .putString("flutter.last_known_real_lat", loc.latitude.toString())
+                                            .putString("flutter.last_known_real_lon", loc.longitude.toString())
+                                            .putLong("flutter.last_known_real_time", System.currentTimeMillis())
+                                            .apply()
+                                    } catch (_: Exception) {}
+                                }
+                            }
+                        }
+                    } catch (_: SecurityException) {} catch (_: Exception) {}
+                }
+            }
 
             if (activeEmergencyLocationListener != null) {
                 try { lm.removeUpdates(activeEmergencyLocationListener!!) } catch (_: Exception) {}
                 activeEmergencyLocationListener = null
             }
 
+            // 3. Suscribir listeners de máxima prioridad (0ms, 0m) en todos los proveedores disponibles
             val listener = object : LocationListener {
                 override fun onLocationChanged(loc: Location) {
                     activeLocation = loc
-                    android.util.Log.i("EmergencyService", "🎯 GPS Satelital de alta precisión fijado: Lat ${loc.latitude}, Lon ${loc.longitude}, Precisión: ±${loc.accuracy}m")
+                    android.util.Log.i("EmergencyService", "🎯 Fix GPS activo fijado [${loc.provider}]: Lat ${loc.latitude}, Lon ${loc.longitude}, Precisión: ±${loc.accuracy}m")
                     try {
                         val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
                         prefs.edit()
@@ -773,11 +844,11 @@ class EmergencyForegroundService : Service() {
                 override fun onProviderDisabled(provider: String) {}
             }
             activeEmergencyLocationListener = listener
-            if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
-                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 100L, 0f, listener, Looper.getMainLooper())
-            }
-            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
-                lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 100L, 0f, listener, Looper.getMainLooper())
+
+            for (prov in availableProviders) {
+                try {
+                    lm.requestLocationUpdates(prov, 0L, 0f, listener, Looper.getMainLooper())
+                } catch (_: SecurityException) {} catch (_: Exception) {}
             }
         } catch (_: SecurityException) {
             android.util.Log.w("EmergencyService", "Permiso de ubicación denegado en segundo plano")
@@ -792,6 +863,9 @@ class EmergencyForegroundService : Service() {
             }
         } catch (_: Exception) {}
         activeEmergencyLocationListener = null
+        if (!isEmergencyActive && !isLiveTrackingActive) {
+            releaseEmergencyWakeLock()
+        }
     }
 
     private fun onRapidPowerPressDetected() {
@@ -857,14 +931,16 @@ class EmergencyForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // 2. Despertar la pantalla y mostrar la app para feedback visual inmediato
+        // 2. Despertar la CPU (PARTIAL_WAKE_LOCK) y la pantalla para feedback visual inmediato
+        acquireEmergencyWakeLock(35000L)
         try {
             val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
-            val wakeLock = powerManager?.newWakeLock(
+            @Suppress("DEPRECATION")
+            val screenWakeLock = powerManager?.newWakeLock(
                 PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                "AlertaCiudadana:PanicWakeLock"
+                "AlertaCiudadana:PanicScreenLock"
             )
-            wakeLock?.acquire(15000L)
+            screenWakeLock?.acquire(15000L)
         } catch (_: Exception) {}
 
         try {
@@ -983,6 +1059,8 @@ class EmergencyForegroundService : Service() {
     private fun dispatchEmergencyAlertFromService(source: String, alertType: String) {
         if (!isUserLoggedIn(this)) return
         Thread {
+            // Mantener la CPU despierta durante la conexión de red y despacho
+            acquireEmergencyWakeLock(30000L)
             var nativeSuccess = false
             var createdReportId: Long? = null
             try {
@@ -992,24 +1070,43 @@ class EmergencyForegroundService : Service() {
                 val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
                 if (bestLocation == null || (System.currentTimeMillis() - bestLocation.time > 15000)) {
                     try {
-                        val gpsLoc = lm?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                        val netLoc = lm?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                        val candidate = when {
-                            gpsLoc != null && netLoc != null -> if (gpsLoc.time > netLoc.time) gpsLoc else netLoc
-                            gpsLoc != null -> gpsLoc
-                            else -> netLoc
+                        val availableProviders = lm?.getProviders(true) ?: emptyList<String>()
+                        var newestCandidate: Location? = null
+                        for (prov in availableProviders) {
+                            try {
+                                val loc = lm?.getLastKnownLocation(prov)
+                                if (loc != null) {
+                                    if (newestCandidate == null || loc.time > newestCandidate.time) {
+                                        newestCandidate = loc
+                                    }
+                                }
+                            } catch (_: SecurityException) {} catch (_: Exception) {}
                         }
-                        if (candidate != null) {
-                            if (bestLocation == null || candidate.time > bestLocation.time) {
-                                bestLocation = candidate
+                        if (newestCandidate != null) {
+                            if (bestLocation == null || newestCandidate.time > bestLocation.time) {
+                                bestLocation = newestCandidate
                             }
                         }
                     } catch (_: Exception) {}
                 }
 
                 val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-                val cachedRealLat = try { prefs.getString("flutter.last_known_real_lat", null)?.toDoubleOrNull() } catch (_: Exception) { null }
-                val cachedRealLon = try { prefs.getString("flutter.last_known_real_lon", null)?.toDoubleOrNull() } catch (_: Exception) { null }
+                val cachedRealLat = try {
+                    val raw = prefs.all["flutter.last_known_real_lat"]
+                    when (raw) {
+                        is String -> raw.toDoubleOrNull()
+                        is Number -> raw.toDouble()
+                        else -> null
+                    }
+                } catch (_: Exception) { null }
+                val cachedRealLon = try {
+                    val raw = prefs.all["flutter.last_known_real_lon"]
+                    when (raw) {
+                        is String -> raw.toDoubleOrNull()
+                        is Number -> raw.toDouble()
+                        else -> null
+                    }
+                } catch (_: Exception) { null }
                 val cachedRealAddress = try { prefs.getString("flutter.last_known_real_address", null) } catch (_: Exception) { null }
 
                 val lat = bestLocation?.latitude ?: cachedRealLat ?: -13.71450
@@ -1320,6 +1417,7 @@ class EmergencyForegroundService : Service() {
 
     override fun onDestroy() {
         isServiceRunning = false
+        releaseEmergencyWakeLock()
         screenReceiver?.let {
             try {
                 unregisterReceiver(it)
