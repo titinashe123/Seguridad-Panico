@@ -77,6 +77,86 @@ function memorySet(dni: string, entry: CacheEntry) {
   memoryCache.set(dni, entry);
 }
 
+// Encriptación AES-GCM-256 en reposo para proteger datos personales en reniec_cache
+const ENCRYPTION_SECRET =
+  Deno.env.get("RENIEC_CACHE_KEY") ??
+  "ALERTA_CIUDADANA_RENIEC_CACHE_AES256_SECRET_KEY_2026_DEFAULT";
+
+async function getAesKey(): Promise<CryptoKey> {
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(ENCRYPTION_SECRET),
+  );
+  return await crypto.subtle.importKey(
+    "raw",
+    keyMaterial,
+    { name: "AES-GCM" },
+    false,
+    ["encrypt", "decrypt"],
+  );
+}
+
+async function encryptPayload(
+  data: Record<string, string> | null,
+): Promise<unknown> {
+  if (!data) return null;
+  try {
+    const key = await getAesKey();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const encoded = new TextEncoder().encode(JSON.stringify(data));
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: "AES-GCM", iv },
+      key,
+      encoded,
+    );
+
+    const b64Iv = btoa(String.fromCharCode(...iv));
+    const b64Cipher = btoa(
+      String.fromCharCode(...new Uint8Array(ciphertext)),
+    );
+
+    return {
+      _enc: "aes-gcm-256",
+      iv: b64Iv,
+      data: b64Cipher,
+    };
+  } catch (err) {
+    console.log(`[reniec][crypto] ENCRYPT_ERROR: ${err}`);
+    return data;
+  }
+}
+
+async function decryptPayload(
+  raw: unknown,
+): Promise<Record<string, string> | null> {
+  if (!raw || typeof raw !== "object") return null;
+  const obj = raw as Record<string, unknown>;
+
+  // Si no está encriptado (registros legacy no cifrados), retornar directo
+  if (obj._enc !== "aes-gcm-256" || typeof obj.data !== "string" || typeof obj.iv !== "string") {
+    return raw as Record<string, string>;
+  }
+
+  try {
+    const key = await getAesKey();
+    const iv = Uint8Array.from(atob(obj.iv), (c) => c.charCodeAt(0));
+    const ciphertext = Uint8Array.from(atob(obj.data), (c) => c.charCodeAt(0));
+
+    const decrypted = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      ciphertext,
+    );
+
+    const jsonStr = new TextDecoder().decode(decrypted);
+    return JSON.parse(jsonStr) as Record<string, string>;
+  } catch (err) {
+    console.log(`[reniec][crypto] DECRYPT_ERROR: ${err}`);
+    return null;
+  }
+}
+
 function cacheHeaders(): Record<string, string> {
   return {
     apikey: SERVICE_ROLE_KEY,
@@ -102,16 +182,17 @@ async function cacheGet(dni: string): Promise<CacheEntry | undefined> {
     const rows = await res.json();
     if (!Array.isArray(rows) || rows.length === 0) return undefined;
 
-    const row = rows[0] as { payload: Record<string, string> | null; expires_at: string };
+    const row = rows[0] as { payload: unknown; expires_at: string };
     const expiresAt = new Date(row.expires_at).getTime();
     if (!Number.isFinite(expiresAt) || Date.now() > expiresAt) {
       await deleteCached(dni);
       return undefined;
     }
 
-    const entry: CacheEntry = { value: row.payload ?? null, expiresAt };
+    const decrypted = await decryptPayload(row.payload);
+    const entry: CacheEntry = { value: decrypted, expiresAt };
     memorySet(dni, entry);
-    console.log(`[reniec][cache] HIT_PERSISTENTE dni=${dni}`);
+    console.log(`[reniec][cache] HIT_PERSISTENTE dni=${dni} (desencriptado en memoria)`);
     return entry;
   } catch (error) {
     console.log(`[reniec][cache] READ_FALLBACK ${error}`);
@@ -143,6 +224,7 @@ async function cacheSet(
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY) return;
 
   try {
+    const encryptedPayload = await encryptPayload(value);
     const res = await fetch(`${CACHE_TABLE_URL}?on_conflict=dni`, {
       method: "POST",
       headers: {
@@ -151,7 +233,7 @@ async function cacheSet(
       },
       body: JSON.stringify({
         dni,
-        payload: value,
+        payload: encryptedPayload,
         expires_at: new Date(entry.expiresAt).toISOString(),
       }),
       signal: AbortSignal.timeout(CACHE_FETCH_TIMEOUT),
