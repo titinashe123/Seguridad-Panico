@@ -17,6 +17,7 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.location.Location
 import android.location.LocationManager
+import android.media.AudioAttributes
 import android.os.Build
 import android.os.CountDownTimer
 import android.os.IBinder
@@ -293,25 +294,50 @@ class EmergencyForegroundService : Service() {
                     return
                 }
 
-                // 2. Debounce optimizado de 40ms (anteriormente 100ms descartaba clics rápidos sucesivos)
-                if (now - lastScreenActionTime < 40) {
+                // 2. Debounce optimizado de 50ms para evitar rebote físico de contactos
+                if (now - lastScreenActionTime < 50) {
                     return
                 }
 
                 lastScreenAction = action
                 lastScreenActionTime = now
 
-                // 3. Ventana deslizante de 3500ms para admitir pulsaciones rápidas con margen para la respuesta de pantalla
-                powerPressTimestamps.removeAll { now - it > 3500 }
+                // 3. Evaluar intervalo con la pulsación anterior:
+                // Cada intervalo entre pulsaciones consecutivas DEBE ser rápido (<= 850ms).
+                // Si la última pulsación fue hace más de 850ms, NO es una secuencia rápida:
+                // se rompe la racha (descarta 2 rápidas y 1 lenta, o varias lentas espaciadas).
+                if (powerPressTimestamps.isNotEmpty()) {
+                    val gap = now - powerPressTimestamps.last()
+                    if (gap > 850) {
+                        powerPressTimestamps.clear()
+                    }
+                }
+
                 powerPressTimestamps.add(now)
 
-                // 4. Disparo inmediato al completar 3 pulsaciones consecutivas
+                // 4. Se activa con 3 pulsaciones consecutivas rápidas (en menos de 1800ms)
+                // O con una ráfaga rápida continua (5 o más pulsaciones rápidas)
                 if (powerPressTimestamps.size >= 3) {
-                    powerPressTimestamps.clear()
-                    lastScreenAction = null
-                    lastButtonTriggerTime = now
-                    android.util.Log.i("EmergencyService", "⚡ DISPARO INSTANTÁNEO BOTÓN DE ENCENDIDO (3X)")
-                    onTriplePowerPressDetected()
+                    val firstPress = powerPressTimestamps.first()
+                    val totalDuration = now - firstPress
+
+                    // Ventana máxima permitida:
+                    // Si son 3 o 4 pulsaciones: máximo 1800ms
+                    // Si son 5 o más pulsaciones rápidas: máximo 3000ms
+                    val maxAllowedDuration = if (powerPressTimestamps.size >= 5) 3000L else 1800L
+
+                    if (totalDuration <= maxAllowedDuration) {
+                        val count = powerPressTimestamps.size
+                        powerPressTimestamps.clear()
+                        lastScreenAction = null
+                        lastButtonTriggerTime = now
+                        android.util.Log.i("EmergencyService", "⚡ DISPARO CONFIRMADO BOTÓN DE ENCENDIDO ($count RÁPIDAS en ${totalDuration}ms)")
+                        onTriplePowerPressDetected()
+                    } else {
+                        // Si la ventana total fue excedida, reiniciar manteniendo solo la última
+                        powerPressTimestamps.clear()
+                        powerPressTimestamps.add(now)
+                    }
                 }
             }
         }
@@ -635,16 +661,8 @@ class EmergencyForegroundService : Service() {
             } catch (_: Exception) {}
         }
 
-        // 3. Vibración táctil de confirmación en el bolsillo
-        try {
-            val vibrator = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator?.vibrate(VibrationEffect.createWaveform(longArrayOf(0, 300, 150, 300, 150, 400), -1))
-            } else {
-                @Suppress("DEPRECATION")
-                vibrator?.vibrate(longArrayOf(0, 300, 150, 300, 150, 400), -1)
-            }
-        } catch (_: Exception) {}
+        // 3. Vibración táctil contundente de confirmación en el bolsillo
+        triggerHapticFeedback()
 
         // 4. Iniciar la notificación con cuenta regresiva (5 segundos)
         updateEmergencyNotificationCountdown(5, alertType, fullScreenPendingIntent)
@@ -708,6 +726,49 @@ class EmergencyForegroundService : Service() {
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
         notificationManager?.notify(PANIC_NOTIFICATION_ID, builder.build())
+    }
+
+    private fun triggerHapticFeedback() {
+        try {
+            val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                val vibratorManager = getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                vibratorManager?.defaultVibrator
+            } else {
+                @Suppress("DEPRECATION")
+                getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+            }
+
+            if (vibrator == null || !vibrator.hasVibrator()) {
+                android.util.Log.w("EmergencyService", "No se detectó vibrador en el dispositivo")
+                return
+            }
+
+            val audioAttributes = AudioAttributes.Builder()
+                .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                .setUsage(AudioAttributes.USAGE_ALARM)
+                .build()
+
+            // Patrón táctil firme y contundente: 3 pulsaciones fuertes
+            // (0ms espera, 320ms vibración, 140ms pausa, 320ms vibración, 140ms pausa, 550ms vibración final)
+            val timings = longArrayOf(0, 320, 140, 320, 140, 550)
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val amplitudes = intArrayOf(0, 255, 0, 255, 0, 255)
+                val effect = VibrationEffect.createWaveform(timings, amplitudes, -1)
+                vibrator.vibrate(effect, audioAttributes)
+            } else {
+                @Suppress("DEPRECATION")
+                vibrator.vibrate(timings, -1)
+            }
+            android.util.Log.i("EmergencyService", "✅ Vibración háptica de alerta activada con éxito")
+        } catch (e: Exception) {
+            android.util.Log.e("EmergencyService", "Error ejecutando vibración háptica: ${e.message}")
+            try {
+                @Suppress("DEPRECATION")
+                val fallback = getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                fallback?.vibrate(700L)
+            } catch (_: Exception) {}
+        }
     }
 
     private fun dispatchEmergencyAlertFromService(source: String, alertType: String) {
