@@ -234,8 +234,24 @@ class AuthService {
     String? otpCode,
   }) async {
     final cleanDni = dni.trim();
-    final cleanFirstName = (firstName ?? name ?? '').trim();
-    final cleanLastName = (lastName ?? '').trim();
+    var cleanFirstName = (firstName ?? name ?? '').trim();
+    var cleanLastName = (lastName ?? '').trim();
+
+    // Si apellidos vino vacío y nombres contiene más de una palabra, descomponer inteligentemente
+    if (cleanLastName.isEmpty && cleanFirstName.contains(' ')) {
+      final parts = cleanFirstName.split(RegExp(r'\s+'));
+      if (parts.length >= 4) {
+        cleanFirstName = parts.sublist(0, 2).join(' ');
+        cleanLastName = parts.sublist(2).join(' ');
+      } else if (parts.length == 3) {
+        cleanFirstName = parts.sublist(0, 1).join(' ');
+        cleanLastName = parts.sublist(1).join(' ');
+      } else if (parts.length == 2) {
+        cleanFirstName = parts[0];
+        cleanLastName = parts[1];
+      }
+    }
+
     final fullName = '$cleanFirstName $cleanLastName'.trim();
     final cleanPhone = phone.trim();
     final cleanPassword = password.trim();
@@ -267,6 +283,20 @@ class AuthService {
         final token = data['token'] as String?;
         final user = data['user'] as Map<String, dynamic>?;
         final idPersona = user?['id_persona'] != null ? int.tryParse(user!['id_persona'].toString()) : null;
+
+        // Asegurar que nombres y apellidos queden correctamente separados en la tabla persona
+        try {
+          await http.patch(
+            Uri.parse('$_supabaseUrl/rest/v1/persona?dni=eq.$cleanDni'),
+            headers: _headers,
+            body: jsonEncode({
+              'nombres': cleanFirstName,
+              'apellidos': cleanLastName,
+            }),
+          ).timeout(const Duration(seconds: 4));
+        } catch (e) {
+          developer.log('Error actualizando nombres y apellidos separados en persona: $e', name: 'AuthService');
+        }
 
         await SessionService.saveSession(
           dni: cleanDni,
