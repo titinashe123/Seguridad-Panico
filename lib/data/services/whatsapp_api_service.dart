@@ -117,6 +117,9 @@ class WhatsAppApiService {
 
   /// Despacha la alerta directamente a través de la API de WhatsApp vía Backend HTTP POST
   /// Sin abrir la app de WhatsApp en el dispositivo del usuario.
+  static DateTime? _lastDispatchTime;
+  static String? _lastDispatchedCategory;
+
   /// Retorna el ID de la alerta (ej: 'ALT-17889291234') si el envío fue exitoso.
   static Future<String?> sendAutomatedEmergencyAlert({
     required String category,
@@ -128,6 +131,20 @@ class WhatsAppApiService {
     String address = 'Av. de la Constitución 145, Lima',
     List<String>? imagePaths,
   }) async {
+    // Protección contra doble disparo involuntario en menos de 5 segundos
+    if (_lastDispatchTime != null &&
+        DateTime.now().difference(_lastDispatchTime!).inSeconds < 5 &&
+        _lastDispatchedCategory == category &&
+        lastAlertId != null) {
+      developer.log(
+        '⚠️ Debounce activo: Alerta de $category ya despachada hace menos de 5s. Reutilizando ID $lastAlertId',
+        name: 'WhatsAppApiService',
+      );
+      return lastAlertId;
+    }
+    _lastDispatchTime = DateTime.now();
+    _lastDispatchedCategory = category;
+
     final message = customMessage ??
         getPredefinedMessage(
           category,
@@ -161,12 +178,10 @@ class WhatsAppApiService {
       developer.log('Error al invocar saveReportToDatabase: $dbErr', name: 'WhatsAppApiService');
     }
 
-    // Obtener datos del ciudadano registrado y token JWT de Keystore
+    // Obtener datos del ciudadano registrado
     Map<String, String>? citizen;
-    String? jwtToken;
     try {
       citizen = await SessionService.getUserData();
-      jwtToken = await SessionService.getJwtToken();
     } catch (_) {}
 
     // Despacho de fotografías de evidencia vía Green API (sendFileByUpload)
@@ -215,59 +230,37 @@ class WhatsAppApiService {
       }
     }
 
-    // 1. Despacho principal a través de Supabase Edge Function (Nube oficial)
+    // 1. Despacho directo a WhatsApp vía Green API oficial (sin duplicar reportes en la base de datos)
     try {
-      final authBearer = jwtToken != null && jwtToken.isNotEmpty ? jwtToken : supabaseAnonKey;
-      final response = await http
+      final cloudResponse = await http
           .post(
-            Uri.parse(supabaseFunctionsUrl),
-            headers: {
-              'Content-Type': 'application/json; charset=utf-8',
-              'Authorization': 'Bearer $authBearer',
-              'apikey': supabaseAnonKey,
-            },
+            Uri.parse(
+              'https://7105.api.greenapi.com/waInstance710522731795/sendMessage/1d98a458d1a64672abcff255236d807432183678856b42cfba',
+            ),
+            headers: {'Content-Type': 'application/json'},
             body: jsonEncode({
-              'category': category,
+              'chatId': '$cleanRecipient@c.us',
               'message': message,
-              'recipientNumber': cleanRecipient,
-              'source': source,
-              'coordinates': {'lat': lat, 'lon': lon},
-              'address': address,
-              'citizen': citizen,
-              'reportId': dbReportId,
-              'alreadySaved': dbReportId != null,
             }),
           )
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 8));
 
-      if (response.statusCode == 200) {
+      if (cloudResponse.statusCode == 200) {
         if (dbReportId != null) {
           ReportStorageService.markReportAsSent(dbReportId);
         }
         developer.log(
-          'Alerta despachada exitosamente a Supabase Edge Function: ${response.body}',
+          'Alerta despachada con éxito vía Green API a WhatsApp: ${cloudResponse.body}',
           name: 'WhatsAppApiService',
         );
-        try {
-          final data = jsonDecode(response.body);
-          if (data['reportId'] != null) {
-            lastAlertId = 'ALT-${data['reportId']}';
-          } else {
-            lastAlertId = data['alertId'] as String?;
-          }
-        } catch (_) {
-          lastAlertId = 'ALT-${DateTime.now().millisecondsSinceEpoch}';
-        }
+        lastAlertId = dbReportId != null ? 'ALT-$dbReportId' : 'ALT-${DateTime.now().millisecondsSinceEpoch}';
         return lastAlertId;
       }
     } catch (e) {
-      developer.log(
-        'Supabase no alcanzable temporalmente, intentando backend alterno: $e',
-        name: 'WhatsAppApiService',
-      );
+      developer.log('Fallo despacho directo Green API: $e', name: 'WhatsAppApiService');
     }
 
-    // 2. Intento secundario de despacho a través del Backend local (si está activo)
+    // 2. Respaldo opcional vía Backend local (si está activo)
     try {
       final response = await http
           .post(
@@ -298,48 +291,15 @@ class WhatsAppApiService {
           final data = jsonDecode(response.body);
           lastAlertId = data['alertId'] as String?;
         } catch (_) {
-          lastAlertId = 'ALT-${DateTime.now().millisecondsSinceEpoch}';
+          lastAlertId = dbReportId != null ? 'ALT-$dbReportId' : 'ALT-${DateTime.now().millisecondsSinceEpoch}';
         }
         return lastAlertId;
       }
     } catch (e) {
-      developer.log(
-        'Backend local no alcanzable, despachando directamente a la API en la nube: $e',
-        name: 'WhatsAppApiService',
-      );
+      developer.log('Backend local no disponible: $e', name: 'WhatsAppApiService');
     }
 
-    // 2. Despacho directo a la API en la nube (Green API) para máxima disponibilidad
-    try {
-      final cloudResponse = await http
-          .post(
-            Uri.parse(
-              'https://7105.api.greenapi.com/waInstance710522731795/sendMessage/1d98a458d1a64672abcff255236d807432183678856b42cfba',
-            ),
-            headers: {'Content-Type': 'application/json'},
-            body: jsonEncode({
-              'chatId': '$cleanRecipient@c.us',
-              'message': message,
-            }),
-          )
-          .timeout(const Duration(seconds: 6));
-
-      if (cloudResponse.statusCode == 200) {
-        if (dbReportId != null) {
-          ReportStorageService.markReportAsSent(dbReportId);
-        }
-        developer.log(
-          'Alerta despachada con éxito vía Green API en la nube: ${cloudResponse.body}',
-          name: 'WhatsAppApiService',
-        );
-        lastAlertId = 'ALT-${DateTime.now().millisecondsSinceEpoch}';
-        return lastAlertId;
-      }
-    } catch (e) {
-      developer.log('Fallo pasarela directa en la nube: $e', name: 'WhatsAppApiService');
-    }
-
-    lastAlertId = 'ALT-${DateTime.now().millisecondsSinceEpoch}';
+    lastAlertId = dbReportId != null ? 'ALT-$dbReportId' : 'ALT-${DateTime.now().millisecondsSinceEpoch}';
     return lastAlertId;
   }
 }

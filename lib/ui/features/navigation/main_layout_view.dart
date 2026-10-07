@@ -9,6 +9,7 @@ import '../../../data/services/session_service.dart';
 import '../../../data/services/report_storage_service.dart';
 import '../../../data/services/auth_service.dart';
 import '../../../data/services/biometric_auth_service.dart';
+import '../../../data/services/app_lock_service.dart';
 
 class MainLayoutView extends StatefulWidget {
   const MainLayoutView({super.key});
@@ -724,14 +725,40 @@ class _ProfileViewState extends State<_ProfileView> {
                           activeThumbColor: AppColors.accentBlue,
                           onChanged: (val) async {
                             if (val) {
-                              final ok = await BiometricAuthService.authenticate(
-                                reason: 'Coloca tu huella digital para activar esta opción',
-                              );
+                              AppLockService().isAuthenticatingBiometrics = true;
+                              bool ok = false;
+                              try {
+                                ok = await BiometricAuthService.authenticate(
+                                  reason: 'Coloca tu huella digital para activar esta opción',
+                                );
+                              } finally {
+                                await Future.delayed(const Duration(milliseconds: 300));
+                                AppLockService().isAuthenticatingBiometrics = false;
+                              }
                               if (!ok) return;
+                            } else {
+                              final pinConfirmed = await _showDisableBiometricsPinDialog();
+                              if (!pinConfirmed) return;
                             }
                             await BiometricAuthService.setBiometricsEnabled(val);
                             if (mounted) {
                               setState(() => _biometricsEnabled = val);
+                              if (!val && mounted) {
+                                ScaffoldMessenger.of(this.context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      'Acceso con huella digital desactivado.',
+                                      style: GoogleFonts.inter(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    backgroundColor: const Color(0xFF1E293B),
+                                    behavior: SnackBarBehavior.floating,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  ),
+                                );
+                              }
                             }
                           },
                         ),
@@ -761,6 +788,135 @@ class _ProfileViewState extends State<_ProfileView> {
               ),
             ),
     );
+  }
+
+  Future<bool> _showDisableBiometricsPinDialog() async {
+    final pinController = TextEditingController();
+    String? errorMessage;
+    bool confirmed = false;
+
+    if (!mounted) return false;
+    await showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDState) {
+            return AlertDialog(
+              backgroundColor: AppColors.surface,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(16),
+                side: const BorderSide(color: AppColors.accentOrange, width: 1.5),
+              ),
+              title: Row(
+                children: [
+                  Container(
+                    padding: const EdgeInsets.all(8),
+                    decoration: BoxDecoration(
+                      color: AppColors.accentOrange.withValues(alpha: 0.15),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(Icons.fingerprint, color: AppColors.accentOrange, size: 24),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      'Desactivar Huella',
+                      style: GoogleFonts.inter(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: Colors.white,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      'Ingresa tu PIN secreto de seguridad (4 dígitos) para confirmar la desactivación del acceso con huella digital.',
+                      style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+                    ),
+                    const SizedBox(height: 16),
+                    TextField(
+                      controller: pinController,
+                      keyboardType: TextInputType.number,
+                      maxLength: 4,
+                      obscureText: true,
+                      obscuringCharacter: '•',
+                      textAlign: TextAlign.center,
+                      style: GoogleFonts.inter(
+                        fontSize: 22,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 8,
+                        color: Colors.white,
+                      ),
+                      decoration: InputDecoration(
+                        hintText: '••••',
+                        counterText: '',
+                        hintStyle: GoogleFonts.inter(letterSpacing: 4, color: AppColors.textMuted),
+                        prefixIcon: const Icon(Icons.pin, color: AppColors.accentOrange, size: 18),
+                        errorText: errorMessage,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dialogContext).pop(),
+                  child: Text(
+                    'CANCELAR',
+                    style: GoogleFonts.inter(
+                      fontWeight: FontWeight.bold,
+                      color: AppColors.textSecondary,
+                    ),
+                  ),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final pin = pinController.text.trim();
+                    if (pin.isEmpty) {
+                      setDState(() {
+                        errorMessage = 'Ingresa tu PIN';
+                      });
+                      return;
+                    }
+                    final isValid = await SessionService.verifySecretPin(pin);
+                    if (!isValid) {
+                      setDState(() {
+                        errorMessage = 'PIN secreto incorrecto';
+                      });
+                      return;
+                    }
+                    confirmed = true;
+                    if (dialogContext.mounted) {
+                      Navigator.of(dialogContext).pop();
+                    }
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primaryRed,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                  ),
+                  child: Text(
+                    'DESACTIVAR',
+                    style: GoogleFonts.inter(
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    return confirmed;
   }
 
   void _showChangePinOptionsDialog(BuildContext context, String dni, String phone) {

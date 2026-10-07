@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'whatsapp_api_service.dart';
 import 'hardware_trigger_service.dart';
+import 'gps_location_service.dart';
 
 /// Servicio de Seguimiento y Rastreo GPS en Tiempo Real exclusivo para casos de ROBO.
 /// Transmite periódicamente las coordenadas actualizadas a la Central de Video Vigilancia
@@ -35,21 +36,38 @@ class LocationTrackingService extends ChangeNotifier {
   /// Inicia el rastreo GPS en vivo para una alerta de ROBO
   void startTracking({
     required String alertId,
-    double initialLat = -12.04637,
-    double initialLon = -77.02987,
+    double? initialLat,
+    double? initialLon,
   }) {
     // Si ya hay un rastreo activo previo, lo detenemos
     stopTracking(notifyBackend: false);
 
     _activeAlertId = alertId;
     _isTracking = true;
-    _currentLat = initialLat;
-    _currentLon = initialLon;
-    _pointCount = 1;
+    _pointCount = 0;
+
+    if (initialLat != null && initialLon != null && initialLat != -12.04637 && initialLat != -13.71450) {
+      _currentLat = initialLat;
+      _currentLon = initialLon;
+      _pointCount = 1;
+    }
+
     notifyListeners();
 
     // Notificar al servicio nativo para actualizar la barra de notificaciones de Android
     HardwareTriggerService().updateLiveTrackingNotification(true);
+
+    // Si aún no tenemos fijación real, obtenerla de inmediato
+    if (_pointCount == 0) {
+      GpsLocationService.getCurrentLocation().then((pos) {
+        if (pos != null && _isTracking) {
+          _currentLat = pos.latitude;
+          _currentLon = pos.longitude;
+          _pointCount = 1;
+          notifyListeners();
+        }
+      }).catchError((_) => null);
+    }
 
     developer.log(
       '🚨 Iniciando rastreo GPS en tiempo real para ROBO (ID: $alertId) en Lat $_currentLat, Lon $_currentLon',
@@ -62,14 +80,25 @@ class LocationTrackingService extends ChangeNotifier {
     });
   }
 
+  /// Actualiza el ID oficial de la alerta una vez confirmado por el backend
+  void updateAlertId(String newAlertId) {
+    if (_activeAlertId != newAlertId) {
+      _activeAlertId = newAlertId;
+      notifyListeners();
+    }
+  }
+
   Future<void> _updateLiveLocation() async {
     if (!_isTracking || _activeAlertId == null) return;
 
-    // Simulación de desplazamiento natural (caminata / vehículo) en pruebas
-    // En dispositivo móvil real se integra con la corriente GPS del sistema
     _pointCount++;
-    _currentLat += (0.00018 * ((_pointCount % 2 == 0) ? 1.0 : 0.6));
-    _currentLon += (0.00014 * ((_pointCount % 3 == 0) ? -1.0 : 1.0));
+    try {
+      final freshPos = await GpsLocationService.getCurrentLocation();
+      if (freshPos != null) {
+        _currentLat = freshPos.latitude;
+        _currentLon = freshPos.longitude;
+      }
+    } catch (_) {}
 
     notifyListeners();
 
@@ -139,8 +168,55 @@ class LocationTrackingService extends ChangeNotifier {
     // Restaurar notificación nativa a modo guardia normal
     HardwareTriggerService().updateLiveTrackingNotification(false);
 
+    // Cancelar cualquier estado de emergencia en el servicio nativo de segundo plano
+    HardwareTriggerService().cancelEmergency();
+
     if (notifyBackend && alertToStop != null) {
-      developer.log('Deteniendo rastreo en el backend para $alertToStop', name: 'LocationTrackingService');
+      developer.log('Deteniendo rastreo en Supabase y servidores para $alertToStop', name: 'LocationTrackingService');
+      final numReportId = int.tryParse(alertToStop.replaceAll(RegExp(r'\D'), ''));
+
+      if (numReportId != null) {
+        // 1. Enviar marcador especial (0.0, 0.0) a tabla 'ubicacion' en Supabase para notificar en tiempo real al panel web
+        try {
+          await http
+              .post(
+                Uri.parse('https://emtzprcntefzkvvzmhfk.supabase.co/rest/v1/ubicacion'),
+                headers: {
+                  'Content-Type': 'application/json',
+                  'apikey': WhatsAppApiService.supabaseAnonKey,
+                  'Authorization': 'Bearer ${WhatsAppApiService.supabaseAnonKey}',
+                },
+                body: jsonEncode({
+                  'id_reporte': numReportId,
+                  'latitud': 0.0,
+                  'longitud': 0.0,
+                }),
+              )
+              .timeout(const Duration(seconds: 4));
+          developer.log('✅ Señal de cancelación de rastreo registrada en Supabase ubicacion', name: 'LocationTrackingService');
+        } catch (e) {
+          developer.log('Error notificando cancelación a Supabase ubicacion: $e', name: 'LocationTrackingService');
+        }
+
+        // 2. Marcar en la tabla reporte que el rastreo fue finalizado por el usuario
+        try {
+          await http
+              .patch(
+                Uri.parse('https://emtzprcntefzkvvzmhfk.supabase.co/rest/v1/reporte?id_reporte=eq.$numReportId'),
+                headers: {
+                  'Content-Type': 'application/json',
+                  'apikey': WhatsAppApiService.supabaseAnonKey,
+                  'Authorization': 'Bearer ${WhatsAppApiService.supabaseAnonKey}',
+                },
+                body: jsonEncode({
+                  'direccion_texto': 'Ubicación móvil (Transmisión finalizada por el usuario)',
+                }),
+              )
+              .timeout(const Duration(seconds: 4));
+        } catch (_) {}
+      }
+
+      // 3. Notificar al backend local si está en ejecución
       try {
         await http
             .post(

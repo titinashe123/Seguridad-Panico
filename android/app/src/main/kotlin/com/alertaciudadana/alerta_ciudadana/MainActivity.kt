@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Build
 import android.os.Bundle
+import android.view.KeyEvent
 import android.view.WindowManager
 import io.flutter.embedding.android.FlutterFragmentActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -28,7 +29,7 @@ class MainActivity : FlutterFragmentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         instance = this
-        clearLockScreenFlags()
+        applyLockScreenFlags(false)
 
         // Solo iniciar el servicio en primer plano si el usuario ha iniciado sesión
         if (EmergencyForegroundService.isUserLoggedIn(this)) {
@@ -38,29 +39,44 @@ class MainActivity : FlutterFragmentActivity() {
         checkIntentExtras(intent)
     }
 
-    private fun clearLockScreenFlags() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(false)
-            setTurnScreenOn(false)
+    private fun applyLockScreenFlags(isEmergency: Boolean) {
+        if (isEmergency) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            }
+            @Suppress("DEPRECATION")
+            window.addFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
+        } else {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(false)
+                setTurnScreenOn(false)
+            }
+            @Suppress("DEPRECATION")
+            window.clearFlags(
+                WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
+                WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
+                WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
+                WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
+            )
         }
-        @Suppress("DEPRECATION")
-        window.clearFlags(
-            WindowManager.LayoutParams.FLAG_SHOW_WHEN_LOCKED or
-            WindowManager.LayoutParams.FLAG_DISMISS_KEYGUARD or
-            WindowManager.LayoutParams.FLAG_TURN_SCREEN_ON or
-            WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON
-        )
     }
 
     override fun onResume() {
         super.onResume()
-        clearLockScreenFlags()
+        if (!pendingTriggerEmergency) {
+            applyLockScreenFlags(false)
+        }
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        clearLockScreenFlags()
         checkIntentExtras(intent)
     }
 
@@ -81,6 +97,7 @@ class MainActivity : FlutterFragmentActivity() {
         }
 
         if (intent.getBooleanExtra(EXTRA_TRIGGER_EMERGENCY, false)) {
+            applyLockScreenFlags(true)
             val src = intent.getStringExtra("source") ?: "power_button_3x"
             val alertType = intent.getStringExtra("alert_type") ?: "ROBO"
             intent.removeExtra(EXTRA_TRIGGER_EMERGENCY)
@@ -256,10 +273,47 @@ class MainActivity : FlutterFragmentActivity() {
         return true
     }
 
-    fun onEmergencyDispatchedFromNative(alertType: String, source: String) {
+    fun onEmergencyDispatchedFromNative(alertType: String, source: String, nativeSuccess: Boolean = true) {
         runOnUiThread {
-            methodChannel?.invokeMethod("onEmergencyDispatched", mapOf("alertType" to alertType, "source" to source))
+            methodChannel?.invokeMethod("onEmergencyDispatched", mapOf("alertType" to alertType, "source" to source, "nativeSuccess" to nativeSuccess))
         }
+    }
+
+    private val physicalKeyTimestamps = mutableListOf<Long>()
+    private var lastKeyTime: Long = 0
+
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action == KeyEvent.ACTION_DOWN) {
+            val keyCode = event.keyCode
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || 
+                keyCode == KeyEvent.KEYCODE_VOLUME_UP || 
+                keyCode == KeyEvent.KEYCODE_POWER) {
+                
+                val now = System.currentTimeMillis()
+                if (now - lastKeyTime > 70L) {
+                    lastKeyTime = now
+                    if (physicalKeyTimestamps.isNotEmpty() && (now - physicalKeyTimestamps.last() > 2200L)) {
+                        physicalKeyTimestamps.clear()
+                    }
+                    physicalKeyTimestamps.removeAll { now - it > 4500L }
+                    physicalKeyTimestamps.add(now)
+
+                    val count = physicalKeyTimestamps.size
+                    android.util.Log.i("MainActivity", "🔘 Tecla física pulsada (código $keyCode). Acumuladas: $count")
+
+                    // Vibración háptica firme ÚNICAMENTE a partir de la 3ra pulsación (3, 4, 5...)
+                    if (count >= 3) {
+                        EmergencyForegroundService.triggerConfirmedHaptic(this)
+                        physicalKeyTimestamps.clear()
+                        android.util.Log.i("MainActivity", "⚡ DISPARO CONFIRMADO POR BOTONES FÍSICOS ($count pulsaciones)")
+                        applyLockScreenFlags(true)
+                        triggerPanicFromNative("physical_button_rapid", "ROBO")
+                        return true
+                    }
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
     }
 
     override fun onDestroy() {

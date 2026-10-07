@@ -199,9 +199,16 @@ class _LoginViewState extends State<LoginView> {
       return;
     }
 
-    final authenticated = await BiometricAuthService.authenticate(
-      reason: 'Coloca tu huella digital para acceder a Alerta Ciudadana',
-    );
+    AppLockService().isAuthenticatingBiometrics = true;
+    bool authenticated = false;
+    try {
+      authenticated = await BiometricAuthService.authenticate(
+        reason: 'Coloca tu huella digital para acceder a Alerta Ciudadana',
+      );
+    } finally {
+      await Future.delayed(const Duration(milliseconds: 300));
+      AppLockService().isAuthenticatingBiometrics = false;
+    }
 
     if (!authenticated) {
       return;
@@ -213,6 +220,7 @@ class _LoginViewState extends State<LoginView> {
     final isLogged = await SessionService.isLoggedIn();
     final sessionDni = (await SessionService.getUserData())['dni'];
     if (isLogged && sessionDni == targetDni) {
+      AppLockService().markJustLoggedIn();
       await HardwareTriggerService().startBackgroundService();
       if (!mounted) return;
       setState(() => _isLoading = false);

@@ -15,8 +15,12 @@ import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
+import android.location.Geocoder
 import android.location.Location
+import android.location.LocationListener
 import android.location.LocationManager
+import android.os.Bundle
+import android.os.Looper
 import android.media.AudioAttributes
 import android.os.Build
 import android.os.CountDownTimer
@@ -41,6 +45,11 @@ class EmergencyForegroundService : Service() {
     private val powerPressTimestamps = ArrayList<Long>()
     private var screenReceiver: BroadcastReceiver? = null
     private var isLiveTrackingActive: Boolean = false
+
+    private var locationManager: LocationManager? = null
+    private var activeLocation: Location? = null
+    private var locationListener: LocationListener? = null
+    private var activeEmergencyLocationListener: LocationListener? = null
 
     private var sensorManager: SensorManager? = null
     private var linearAccelerometer: Sensor? = null
@@ -86,9 +95,80 @@ class EmergencyForegroundService : Service() {
         fun isUserLoggedIn(context: Context): Boolean {
             return try {
                 val prefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
-                prefs.getBoolean("flutter.app_session_is_logged_in", false)
+                val loggedIn = prefs.getBoolean("flutter.app_session_is_logged_in", false)
+                if (loggedIn) return true
+
+                val dni = prefs.getString("flutter.app_session_user_dni", "") ?: ""
+                val lastDni = prefs.getString("flutter.app_last_used_dni", "") ?: ""
+                val token = prefs.getString("flutter.app_session_jwt_token", "") ?: ""
+                val pin = prefs.getString("flutter.app_session_secret_pin", "") ?: ""
+                val idPersona = prefs.getInt("flutter.app_session_user_id_persona", -1)
+
+                if (dni.isNotEmpty() || lastDni.isNotEmpty() || token.isNotEmpty() || pin.isNotEmpty() || idPersona > 0) {
+                    return true
+                }
+
+                if (MainActivity.instance != null) {
+                    return true
+                }
+
+                true
             } catch (_: Exception) {
-                false
+                true
+            }
+        }
+
+        fun triggerSinglePressHaptic(context: Context) {
+            try {
+                val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                    vibratorManager?.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    vibrator?.vibrate(VibrationEffect.createOneShot(45, VibrationEffect.DEFAULT_AMPLITUDE))
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator?.vibrate(45L)
+                }
+            } catch (_: Exception) {}
+        }
+
+        fun triggerConfirmedHaptic(context: Context) {
+            try {
+                val vibrator = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val vibratorManager = context.getSystemService(Context.VIBRATOR_MANAGER_SERVICE) as? android.os.VibratorManager
+                    vibratorManager?.defaultVibrator
+                } else {
+                    @Suppress("DEPRECATION")
+                    context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                }
+
+                if (vibrator == null || !vibrator.hasVibrator()) return
+
+                val audioAttributes = AudioAttributes.Builder()
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION)
+                    .setUsage(AudioAttributes.USAGE_ALARM)
+                    .build()
+
+                // Patrón táctil firme y contundente de 3 pulsaciones fuertes
+                val timings = longArrayOf(0, 320, 140, 320, 140, 550)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    val amplitudes = intArrayOf(0, 255, 0, 255, 0, 255)
+                    val effect = VibrationEffect.createWaveform(timings, amplitudes, -1)
+                    vibrator.vibrate(effect, audioAttributes)
+                } else {
+                    @Suppress("DEPRECATION")
+                    vibrator.vibrate(timings, -1)
+                }
+            } catch (_: Exception) {
+                try {
+                    @Suppress("DEPRECATION")
+                    val fallback = context.getSystemService(Context.VIBRATOR_SERVICE) as? Vibrator
+                    fallback?.vibrate(700L)
+                } catch (_: Exception) {}
             }
         }
 
@@ -122,6 +202,15 @@ class EmergencyForegroundService : Service() {
             isEmergencyActive = false
             isEmergencyDispatched = false
 
+            // Enviar orden inmediata de fin de rastreo y restauración de notificación al servicio
+            try {
+                val intent = Intent(context, EmergencyForegroundService::class.java).apply {
+                    action = ACTION_SET_TRACKING
+                    putExtra(EXTRA_IS_TRACKING, false)
+                }
+                context.startService(intent)
+            } catch (_: Exception) {}
+
             try {
                 val prefs = context.getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
                 prefs.edit()
@@ -154,6 +243,7 @@ class EmergencyForegroundService : Service() {
         createNotificationChannels()
         registerScreenReceiver()
         registerSensorListener()
+        registerLocationListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -171,11 +261,19 @@ class EmergencyForegroundService : Service() {
             }
             ACTION_SET_TRACKING -> {
                 isLiveTrackingActive = intent.getBooleanExtra(EXTRA_IS_TRACKING, false)
+                if (!isLiveTrackingActive) {
+                    stopHighAccuracyGpsLock()
+                }
+                val notification = buildCurrentNotification()
+                val manager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
+                manager?.notify(NOTIFICATION_ID, notification)
+                return START_STICKY
             }
         }
 
         registerScreenReceiver()
         registerSensorListener()
+        registerLocationListener()
 
         val notification = buildCurrentNotification()
         startForeground(NOTIFICATION_ID, notification)
@@ -256,7 +354,7 @@ class EmergencyForegroundService : Service() {
             return NotificationCompat.Builder(this, CHANNEL_ID)
                 .setSmallIcon(smallIcon)
                 .setContentTitle("AlertaCiudadana - Protección Activa")
-                .setContentText("Monitoreando botón de encendido (3x) para emergencias")
+                .setContentText("Monitoreando botón de encendido (3+ pulsaciones rápidas)")
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setOngoing(true)
                 .setContentIntent(appPendingIntent)
@@ -280,63 +378,64 @@ class EmergencyForegroundService : Service() {
                     return
                 }
 
-                // Si ya está activa la emergencia o en cuenta regresiva, NO reiniciar ni alterar
-                if (isEmergencyActive) {
-                    return
-                }
-
                 val action = intent?.action ?: return
                 val now = System.currentTimeMillis()
 
-                // 1. Descartar eventos duplicados de la misma acción
-                // (evita que Always On Display, ambient display o rebotes del sistema sumen pulsaciones falsas)
-                if (action == lastScreenAction) {
-                    return
+                // Si ya está activa la emergencia: verificar si expiró (más de 30s) para no bloquear indefinidamente
+                if (isEmergencyActive) {
+                    if (emergencyTriggerTimestamp > 0 && (now - emergencyTriggerTimestamp > 30000L)) {
+                        isEmergencyActive = false
+                        activeCountdownTimer?.cancel()
+                        activeCountdownTimer = null
+                    } else {
+                        // El usuario sigue pulsando en emergencia: darle confirmación háptica táctil
+                        triggerConfirmedHaptic(this@EmergencyForegroundService)
+                        return
+                    }
                 }
 
-                // 2. Debounce optimizado de 50ms para evitar rebote físico de contactos
-                if (now - lastScreenActionTime < 50) {
+                // Debounce de 70ms para filtrar rebotes mecánicos del botón
+                if (now - lastScreenActionTime < 70L) {
                     return
                 }
-
-                lastScreenAction = action
                 lastScreenActionTime = now
+                lastScreenAction = action
 
-                // 3. Evaluar intervalo con la pulsación anterior:
-                // Cada intervalo entre pulsaciones consecutivas DEBE ser rápido (<= 850ms).
-                // Si la última pulsación fue hace más de 850ms, NO es una secuencia rápida:
-                // se rompe la racha (descarta 2 rápidas y 1 lenta, o varias lentas espaciadas).
+                // Limpiar si el intervalo entre pulsaciones consecutivas excede 2200ms
+                // (Margen amplio para absorber la latencia de encendido/apagado de pantalla en Android)
                 if (powerPressTimestamps.isNotEmpty()) {
                     val gap = now - powerPressTimestamps.last()
-                    if (gap > 850) {
+                    if (gap > 2200L) {
                         powerPressTimestamps.clear()
                     }
                 }
 
+                // Descartar marcas con más de 4500ms de antigüedad en la ventana deslizante
+                powerPressTimestamps.removeAll { now - it > 4500L }
+
                 powerPressTimestamps.add(now)
 
-                // 4. Se activa con 3 pulsaciones consecutivas rápidas (en menos de 1800ms)
-                // O con una ráfaga rápida continua (5 o más pulsaciones rápidas)
-                if (powerPressTimestamps.size >= 3) {
+                val currentCount = powerPressTimestamps.size
+                android.util.Log.i("EmergencyService", "🔘 Pulsación física detectada [$action]. Acumuladas en ráfaga: $currentCount")
+
+                // Activación de emergencia: 3 o más pulsaciones rápidas y seguidas
+                // La vibración háptica se activa ÚNICAMENTE a partir de la 3ra pulsación (3, 4, 5...)
+                if (currentCount >= 3) {
                     val firstPress = powerPressTimestamps.first()
                     val totalDuration = now - firstPress
 
-                    // Ventana máxima permitida:
-                    // Si son 3 o 4 pulsaciones: máximo 1800ms
-                    // Si son 5 o más pulsaciones rápidas: máximo 3000ms
-                    val maxAllowedDuration = if (powerPressTimestamps.size >= 5) 3000L else 1800L
-
-                    if (totalDuration <= maxAllowedDuration) {
-                        val count = powerPressTimestamps.size
+                    if (totalDuration <= 4500L) {
+                        // Confirmación háptica firme y distintiva desde la 3ra pulsación
+                        triggerConfirmedHaptic(this@EmergencyForegroundService)
                         powerPressTimestamps.clear()
                         lastScreenAction = null
                         lastButtonTriggerTime = now
-                        android.util.Log.i("EmergencyService", "⚡ DISPARO CONFIRMADO BOTÓN DE ENCENDIDO ($count RÁPIDAS en ${totalDuration}ms)")
-                        onTriplePowerPressDetected()
+                        android.util.Log.i("EmergencyService", "⚡ DISPARO CONFIRMADO BOTÓN DE ENCENDIDO ($currentCount PULSACIONES RÁPIDAS en ${totalDuration}ms)")
+                        onRapidPowerPressDetected()
                     } else {
-                        // Si la ventana total fue excedida, reiniciar manteniendo solo la última
-                        powerPressTimestamps.clear()
-                        powerPressTimestamps.add(now)
+                        while (powerPressTimestamps.isNotEmpty() && (now - powerPressTimestamps.first() > 4500L)) {
+                            powerPressTimestamps.removeAt(0)
+                        }
                     }
                 }
             }
@@ -581,10 +680,112 @@ class EmergencyForegroundService : Service() {
         gyroscope = null
     }
 
-    private fun onTriplePowerPressDetected() {
+    private fun registerLocationListener() {
+        if (locationListener != null) return
+        try {
+            locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+            locationListener = object : LocationListener {
+                override fun onLocationChanged(location: Location) {
+                    if (activeLocation == null || location.accuracy <= (activeLocation!!.accuracy + 5) || location.time > activeLocation!!.time + 10000) {
+                        activeLocation = location
+                    }
+                }
+                override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                override fun onProviderEnabled(provider: String) {}
+                override fun onProviderDisabled(provider: String) {}
+            }
+
+            locationManager?.let { lm ->
+                if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                    lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 3000L, 2f, locationListener!!)
+                }
+                if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                    lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 3000L, 5f, locationListener!!)
+                }
+            }
+        } catch (_: SecurityException) {
+        } catch (_: Exception) {}
+    }
+
+    private fun unregisterLocationListener() {
+        try {
+            locationListener?.let {
+                locationManager?.removeUpdates(it)
+            }
+        } catch (_: Exception) {}
+        locationListener = null
+        locationManager = null
+    }
+
+    private fun forceHighAccuracyGpsLock() {
+        try {
+            val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return
+            
+            // 1. Obtener de inmediato la última posición conocida del sistema si está disponible
+            try {
+                val gpsLoc = if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) lm.getLastKnownLocation(LocationManager.GPS_PROVIDER) else null
+                val netLoc = if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) lm.getLastKnownLocation(LocationManager.NETWORK_PROVIDER) else null
+                val immediateCandidate = when {
+                    gpsLoc != null && netLoc != null -> if (gpsLoc.time > netLoc.time) gpsLoc else netLoc
+                    gpsLoc != null -> gpsLoc
+                    else -> netLoc
+                }
+                if (immediateCandidate != null) {
+                    if (activeLocation == null || immediateCandidate.time > activeLocation!!.time) {
+                        activeLocation = immediateCandidate
+                        android.util.Log.i("EmergencyService", "⚡ Posición GPS inicial inmediata disponible: Lat ${immediateCandidate.latitude}, Lon ${immediateCandidate.longitude} (antigüedad ${(System.currentTimeMillis() - immediateCandidate.time)/1000}s)")
+                    }
+                }
+            } catch (_: Exception) {}
+
+            if (activeEmergencyLocationListener != null) {
+                try { lm.removeUpdates(activeEmergencyLocationListener!!) } catch (_: Exception) {}
+                activeEmergencyLocationListener = null
+            }
+
+            val listener = object : LocationListener {
+                override fun onLocationChanged(loc: Location) {
+                    activeLocation = loc
+                    android.util.Log.i("EmergencyService", "🎯 GPS Satelital de alta precisión fijado: Lat ${loc.latitude}, Lon ${loc.longitude}, Precisión: ±${loc.accuracy}m")
+                    try {
+                        val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                        prefs.edit()
+                            .putString("flutter.last_known_real_lat", loc.latitude.toString())
+                            .putString("flutter.last_known_real_lon", loc.longitude.toString())
+                            .putLong("flutter.last_known_real_time", System.currentTimeMillis())
+                            .apply()
+                    } catch (_: Exception) {}
+                }
+                override fun onStatusChanged(provider: String?, status: Int, extras: Bundle?) {}
+                override fun onProviderEnabled(provider: String) {}
+                override fun onProviderDisabled(provider: String) {}
+            }
+            activeEmergencyLocationListener = listener
+            if (lm.isProviderEnabled(LocationManager.GPS_PROVIDER)) {
+                lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 100L, 0f, listener, Looper.getMainLooper())
+            }
+            if (lm.isProviderEnabled(LocationManager.NETWORK_PROVIDER)) {
+                lm.requestLocationUpdates(LocationManager.NETWORK_PROVIDER, 100L, 0f, listener, Looper.getMainLooper())
+            }
+        } catch (_: SecurityException) {
+            android.util.Log.w("EmergencyService", "Permiso de ubicación denegado en segundo plano")
+        } catch (_: Exception) {}
+    }
+
+    private fun stopHighAccuracyGpsLock() {
+        try {
+            activeEmergencyLocationListener?.let {
+                val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+                lm?.removeUpdates(it)
+            }
+        } catch (_: Exception) {}
+        activeEmergencyLocationListener = null
+    }
+
+    private fun onRapidPowerPressDetected() {
         if (!isUserLoggedIn(this)) return
         if (isEmergencyActive) return
-        startEmergencyFlow("power_button_3x", "ROBO", "Se detectaron 3 pulsaciones rápidas del botón de encendido")
+        startEmergencyFlow("power_button_rapid", "ROBO", "Se detectaron 3 o más pulsaciones rápidas y seguidas del botón de encendido")
     }
 
     private fun onTheftSnatchDetected(source: String, detailInfo: String) {
@@ -608,6 +809,9 @@ class EmergencyForegroundService : Service() {
         currentEmergencyAlertType = alertType
         emergencyTriggerTimestamp = System.currentTimeMillis()
         isEmergencyDispatched = false
+
+        // Iniciar fijación satelital activa inmediata durante el conteo de 5 segundos
+        forceHighAccuracyGpsLock()
 
         // Guardar estado en SharedPreferences
         try {
@@ -641,25 +845,23 @@ class EmergencyForegroundService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        // 2. Si el dispositivo NO está bloqueado, interactuar con la app viva
-        if (!isDeviceLocked) {
-            try {
-                MainActivity.instance?.triggerPanicFromNative(source, alertType)
-            } catch (_: Exception) {}
+        // 2. Despertar la pantalla y mostrar la app para feedback visual inmediato
+        try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
+            val wakeLock = powerManager?.newWakeLock(
+                PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "AlertaCiudadana:PanicWakeLock"
+            )
+            wakeLock?.acquire(15000L)
+        } catch (_: Exception) {}
 
-            try {
-                val powerManager = getSystemService(Context.POWER_SERVICE) as? PowerManager
-                val wakeLock = powerManager?.newWakeLock(
-                    PowerManager.SCREEN_BRIGHT_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
-                    "AlertaCiudadana:PanicWakeLock"
-                )
-                wakeLock?.acquire(15000L)
-            } catch (_: Exception) {}
+        try {
+            MainActivity.instance?.triggerPanicFromNative(source, alertType)
+        } catch (_: Exception) {}
 
-            try {
-                startActivity(fullScreenIntent)
-            } catch (_: Exception) {}
-        }
+        try {
+            startActivity(fullScreenIntent)
+        } catch (_: Exception) {}
 
         // 3. Vibración táctil contundente de confirmación en el bolsillo
         triggerHapticFeedback()
@@ -716,13 +918,8 @@ class EmergencyForegroundService : Service() {
                 fullScreenPendingIntent
             )
 
-        if (isDeviceLocked) {
-            // Modo Sigiloso: en la pantalla de bloqueo NO se expone la alerta ni se lanza la pantalla completa
-            builder.setVisibility(NotificationCompat.VISIBILITY_SECRET)
-        } else {
-            builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            builder.setFullScreenIntent(fullScreenPendingIntent, true)
-        }
+        builder.setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+        builder.setFullScreenIntent(fullScreenPendingIntent, true)
 
         val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as? NotificationManager
         notificationManager?.notify(PANIC_NOTIFICATION_ID, builder.build())
@@ -777,24 +974,77 @@ class EmergencyForegroundService : Service() {
             var nativeSuccess = false
             var createdReportId: Long? = null
             try {
-                // 1. Obtener última ubicación GPS
-                val locationManager = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-                var bestLocation: Location? = null
+                // 1. Obtener última y mejor ubicación GPS (priorizando la fijación satelital activa en tiempo real)
+                stopHighAccuracyGpsLock()
+                var bestLocation: Location? = activeLocation
+                val lm = getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+                if (bestLocation == null || (System.currentTimeMillis() - bestLocation.time > 15000)) {
+                    try {
+                        val gpsLoc = lm?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
+                        val netLoc = lm?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
+                        val candidate = when {
+                            gpsLoc != null && netLoc != null -> if (gpsLoc.time > netLoc.time) gpsLoc else netLoc
+                            gpsLoc != null -> gpsLoc
+                            else -> netLoc
+                        }
+                        if (candidate != null) {
+                            if (bestLocation == null || candidate.time > bestLocation.time) {
+                                bestLocation = candidate
+                            }
+                        }
+                    } catch (_: Exception) {}
+                }
+
+                val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
+                val cachedRealLat = try { prefs.getString("flutter.last_known_real_lat", null)?.toDoubleOrNull() } catch (_: Exception) { null }
+                val cachedRealLon = try { prefs.getString("flutter.last_known_real_lon", null)?.toDoubleOrNull() } catch (_: Exception) { null }
+                val cachedRealAddress = try { prefs.getString("flutter.last_known_real_address", null) } catch (_: Exception) { null }
+
+                val lat = bestLocation?.latitude ?: cachedRealLat ?: -13.71450
+                val lon = bestLocation?.longitude ?: cachedRealLon ?: -76.20320
+
+                // Resolver dirección y calle exacta mediante el Geocoder nativo
+                var realAddress = cachedRealAddress ?: "Pisco, Ica - Ubicación móvil"
+                val accuracyStr = if (bestLocation != null && bestLocation.hasAccuracy()) " (±${String.format(Locale.US, "%.1f", bestLocation.accuracy)}m)" else ""
                 try {
-                    val gpsLoc = locationManager?.getLastKnownLocation(LocationManager.GPS_PROVIDER)
-                    val netLoc = locationManager?.getLastKnownLocation(LocationManager.NETWORK_PROVIDER)
-                    bestLocation = when {
-                        gpsLoc != null && netLoc != null -> if (gpsLoc.time > netLoc.time) gpsLoc else netLoc
-                        gpsLoc != null -> gpsLoc
-                        else -> netLoc
+                    if (Geocoder.isPresent()) {
+                        val geocoder = Geocoder(this, Locale("es", "PE"))
+                        @Suppress("DEPRECATION")
+                        val addresses = geocoder.getFromLocation(lat, lon, 1)
+                        if (!addresses.isNullOrEmpty()) {
+                            val addr = addresses[0]
+                            val thoroughfare = addr.thoroughfare
+                            val subThoroughfare = addr.subThoroughfare
+                            val locality = addr.locality ?: addr.subAdminArea ?: "Pisco"
+                            if (!thoroughfare.isNullOrBlank()) {
+                                realAddress = if (!subThoroughfare.isNullOrBlank()) {
+                                    "$thoroughfare $subThoroughfare, $locality$accuracyStr"
+                                } else {
+                                    "$thoroughfare, $locality$accuracyStr"
+                                }
+                            } else {
+                                val line = addr.getAddressLine(0)
+                                if (!line.isNullOrBlank()) {
+                                    realAddress = "$line$accuracyStr"
+                                }
+                            }
+                        }
                     }
+                } catch (geoErr: Exception) {
+                    android.util.Log.w("EmergencyService", "Geocoder fallback: ${geoErr.message}")
+                    realAddress = "Ubicación móvil GPS$accuracyStr"
+                }
+
+                try {
+                    prefs.edit()
+                        .putString("flutter.last_known_real_lat", lat.toString())
+                        .putString("flutter.last_known_real_lon", lon.toString())
+                        .putString("flutter.last_known_real_address", realAddress)
+                        .putLong("flutter.last_known_real_time", System.currentTimeMillis())
+                        .apply()
                 } catch (_: Exception) {}
 
-                val lat = bestLocation?.latitude ?: -13.71450
-                val lon = bestLocation?.longitude ?: -76.20320
-
                 // 2. Leer datos del ciudadano desde SharedPreferences de forma completamente segura (sin ClassCastException)
-                val prefs = getSharedPreferences("FlutterSharedPreferences", Context.MODE_PRIVATE)
                 val citizenDni = prefs.getString("flutter.app_session_user_dni", null) ?: "74629337"
                 val idPersona: Int = try {
                     val raw = prefs.all["flutter.app_session_user_id_persona"]
@@ -813,11 +1063,11 @@ class EmergencyForegroundService : Service() {
                     "🚨 ¡AUXILIO! ME ESTÁN ROBANDO 🚨"
                 }
                 val triggerLabel = when (source) {
-                    "power_button_3x" -> "BOTÓN DE ENCENDIDO (3X RÁPIDO) [MODO BOLSILLO / APP CERRADA]"
+                    "power_button_rapid", "power_button_3x" -> "BOTÓN DE ENCENDIDO (3+ PULSACIONES RÁPIDAS SEGUIDAS) [MODO BOLSILLO / APP CERRADA]"
                     "sensor_antirrobo_acelerometro" -> "SENSOR ANTIRROBO (ARREBATO BRUSCO / ACELERÓMETRO)"
                     "sensor_antirrobo_giroscopio" -> "SENSOR ANTIRROBO (FORCEJEO BRUSCO / GIROSCOPIO)"
                     "sensor_antirrobo" -> "SENSOR ANTIRROBO (DETECCIÓN DE ROBO EN SEGUNDO PLANO)"
-                    "physical_button_3x" -> "BOTÓN FÍSICO RÁPIDO (3X) [DESESPERACIÓN / ROBO]"
+                    "physical_button_3x", "physical_button_rapid" -> "BOTÓN FÍSICO RÁPIDO (3+ PULSACIONES SEGUIDAS) [ROBO]"
                     else -> "DETECCIÓN AUTOMÁTICA DE ROBO (FONDO)"
                 }
                 val latStr = String.format(Locale.US, "%.5f", lat)
@@ -826,7 +1076,7 @@ class EmergencyForegroundService : Service() {
                 val gmapsNav = "🚗 Cómo llegar (Google Maps): https://www.google.com/maps/dir/?api=1&destination=$latStr,$lonStr"
 
                 val message = "$headline\n" +
-                        "📍 Ubicación: Ubicación móvil GPS (Pisco)\n" +
+                        "📍 Ubicación: $realAddress\n" +
                         "🛰️ Coordenadas: Lat $latStr, Lon $lonStr\n" +
                         "🗺️ Mapa: $gmapsUrl\n" +
                         "$gmapsNav\n" +
@@ -891,7 +1141,7 @@ class EmergencyForegroundService : Service() {
                         put("id_estado", 1)
                         put("fecha_hora", nowUtcIso)
                         put("descripcion", message)
-                        put("direccion_texto", "Ubicación móvil GPS (Pisco)")
+                        put("direccion_texto", realAddress)
                     }
                     val sBytes = sBody.toString().toByteArray(Charsets.UTF_8)
                     sConn.setFixedLengthStreamingMode(sBytes.size)
@@ -941,7 +1191,7 @@ class EmergencyForegroundService : Service() {
                         })
                         put("fecha_hora", nowUtcIso)
                         put("descripcion", message)
-                        put("direccion_texto", "Ubicación móvil GPS (Pisco)")
+                        put("direccion_texto", realAddress)
                         put("fotos", org.json.JSONArray())
                         put("latitud", lat)
                         put("longitud", lon)
@@ -992,7 +1242,7 @@ class EmergencyForegroundService : Service() {
 
                 // 10. Si MainActivity está abierta o se abre, informarle
                 MainActivity.instance?.runOnUiThread {
-                    MainActivity.instance?.onEmergencyDispatchedFromNative(alertType, source)
+                    MainActivity.instance?.onEmergencyDispatchedFromNative(alertType, source, nativeSuccess)
                 }
             } catch (fatal: Exception) {
                 android.util.Log.e("EmergencyForegroundService", "Fatal error in dispatch: ${fatal.message}", fatal)
@@ -1065,6 +1315,7 @@ class EmergencyForegroundService : Service() {
         }
         screenReceiver = null
         unregisterSensorListener()
+        unregisterLocationListener()
         super.onDestroy()
     }
 

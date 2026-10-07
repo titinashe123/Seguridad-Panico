@@ -10,6 +10,8 @@ import '../../../data/services/session_service.dart';
 import '../../../data/services/gps_location_service.dart';
 import '../../../data/services/whatsapp_api_service.dart';
 import '../../../data/services/report_storage_service.dart';
+import '../../../data/services/biometric_auth_service.dart';
+import '../../../data/services/app_lock_service.dart';
 import '../emergency/emergency_countdown_dialog.dart';
 import '../reports/new_report_view.dart';
 
@@ -67,7 +69,7 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
         final type = alertType ?? 'ROBO';
         final label = source.contains('sensor')
             ? 'SENSOR ANTIRROBO (ARREBATO / FORCEJEO)'
-            : 'BOTÓN DE ENCENDIDO (3X)';
+            : 'BOTÓN DE ENCENDIDO (3+ PULSACIONES SEGUIDAS)';
         EmergencyCountdownDialog.show(
           context,
           alertType: type,
@@ -78,18 +80,46 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
       onEmergencyDispatched: (alertType, source, [nativeSuccess = false]) async {
         if (!mounted) return;
 
+        final isRobo = alertType.trim().toUpperCase() == 'ROBO';
+        final isSecuestro = alertType.trim().toUpperCase() == 'SECUESTRO';
+        final hasLiveTracking = isRobo || isSecuestro;
+
+        // Obtener posición satelital real o última posición real persistida
+        final position = await GpsLocationService.getCurrentLocation();
+        final cached = await GpsLocationService.getCachedRealCoordinates();
+        final double lat = position?.latitude ?? (cached?['lat'] as double?) ?? -13.71450;
+        final double lon = position?.longitude ?? (cached?['lon'] as double?) ?? -76.20320;
+        String address = (cached?['address'] as String?) ?? 'Pisco, Ica - Ubicación móvil';
+        if (position != null) {
+          final realStreet = await GpsLocationService.getAddressFromCoordinates(lat, lon);
+          address = realStreet != null
+              ? '$realStreet (±${position.accuracy.toStringAsFixed(1)}m)'
+              : 'Ubicación móvil GPS (±${position.accuracy.toStringAsFixed(1)}m)';
+        }
+
+        // ACTIVACIÓN INSTANTÁNEA del rastreo GPS en vivo con la posición real
+        if (hasLiveTracking) {
+          final provisionalId = WhatsAppApiService.lastAlertId ?? 'ALT-${DateTime.now().millisecondsSinceEpoch}';
+          LocationTrackingService().startTracking(
+            alertId: provisionalId,
+            initialLat: lat,
+            initialLon: lon,
+          );
+        }
+
         String? dispatchedAlertId;
         // Si la conexión en segundo plano estuvo restringida por ahorro de energía (Android Doze Mode),
         // Flutter garantiza el despacho inmediato al despertar la app
         if (nativeSuccess != true) {
           developer.log('⚡ Red en segundo plano restringida: despachando alerta inmediatamente vía Flutter...', name: 'HomeView');
-          final position = await GpsLocationService.getCurrentLocation();
           dispatchedAlertId = await WhatsAppApiService.sendAutomatedEmergencyAlert(
             category: alertType,
-            source: source == 'power_button_3x' ? 'BOTÓN DE ENCENDIDO (3X)' : 'SENSOR ANTIRROBO (ARREBATO / FORCEJEO)',
-            lat: position?.latitude ?? -13.71450,
-            lon: position?.longitude ?? -76.20320,
-            address: position != null ? 'Ubicación móvil GPS (Pisco)' : 'Pisco, Ica - Ubicación móvil',
+            source: (source.contains('power_button') || source.contains('button'))
+                ? 'BOTÓN DE ENCENDIDO (3+ PULSACIONES SEGUIDAS)'
+                : 'SENSOR ANTIRROBO (ARREBATO / FORCEJEO)',
+            lat: lat,
+            lon: lon,
+            address: address,
           );
         } else {
           // Si el servicio nativo ya lo envió exitosamente, refrescar la lista de reportes
@@ -97,14 +127,9 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
           dispatchedAlertId = WhatsAppApiService.lastAlertId ?? 'ALT-${DateTime.now().millisecondsSinceEpoch}';
         }
 
-        // Si es ROBO, activar rastreo GPS en vivo
-        if (alertType == 'ROBO') {
-          final position = await GpsLocationService.getCurrentLocation();
-          LocationTrackingService().startTracking(
-            alertId: dispatchedAlertId ?? 'ALT-${DateTime.now().millisecondsSinceEpoch}',
-            initialLat: position?.latitude ?? -13.71450,
-            initialLon: position?.longitude ?? -76.20320,
-          );
+        // Actualizar el alertId oficial si ya llegó la respuesta
+        if (hasLiveTracking && dispatchedAlertId != null) {
+          LocationTrackingService().updateAlertId(dispatchedAlertId);
         }
 
         if (mounted) {
@@ -277,141 +302,221 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
     _isStopTrackingDialogOpen = true;
     final pinController = TextEditingController();
     String? errorMessage;
+    final canUseBio = await BiometricAuthService.isBiometricsReady() &&
+        await BiometricAuthService.isBiometricsEnabled();
 
     try {
+      if (!context.mounted) return;
       await showDialog(
         context: context,
         barrierDismissible: false,
         builder: (dialogContext) {
           return StatefulBuilder(
-          builder: (context, setDialogState) {
-            return AlertDialog(
-              backgroundColor: AppColors.surface,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(16),
-                side: const BorderSide(color: AppColors.primaryRed, width: 1.5),
-              ),
-              title: Row(
-                children: [
-                  Container(
-                    padding: const EdgeInsets.all(8),
-                    decoration: BoxDecoration(
-                      color: AppColors.primaryRed.withValues(alpha: 0.15),
-                      borderRadius: BorderRadius.circular(8),
+            builder: (context, setDialogState) {
+              return AlertDialog(
+                backgroundColor: AppColors.surface,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                  side: const BorderSide(color: AppColors.primaryRed, width: 1.5),
+                ),
+                title: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: AppColors.primaryRed.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(Icons.lock_outline, color: AppColors.primaryRed, size: 22),
                     ),
-                    child: const Icon(Icons.lock_outline, color: AppColors.primaryRed, size: 22),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        'Desactivar Transmisión',
+                        style: GoogleFonts.inter(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                content: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      if (canUseBio) ...[
+                        ElevatedButton.icon(
+                          onPressed: () async {
+                            AppLockService().isAuthenticatingBiometrics = true;
+                            bool authenticated = false;
+                            try {
+                              authenticated = await BiometricAuthService.authenticate(
+                                reason: 'Coloca tu huella digital para desactivar la transmisión de ubicación',
+                              );
+                            } finally {
+                              await Future.delayed(const Duration(milliseconds: 300));
+                              AppLockService().isAuthenticatingBiometrics = false;
+                            }
+
+                            if (authenticated) {
+                              await trackingService.stopTracking();
+                              if (dialogContext.mounted) {
+                                Navigator.of(dialogContext).pop();
+                              }
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                      'Transmisión de ubicación finalizada con huella digital.',
+                                      style: GoogleFonts.inter(
+                                        color: Colors.white,
+                                        fontWeight: FontWeight.w600,
+                                      ),
+                                    ),
+                                    backgroundColor: const Color(0xFF1E293B),
+                                    behavior: SnackBarBehavior.floating,
+                                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                                  ),
+                                );
+                              }
+                            }
+                          },
+                          icon: const Icon(Icons.fingerprint, color: Colors.white, size: 24),
+                          label: Text(
+                            'DESACTIVAR CON HUELLA',
+                            style: GoogleFonts.inter(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w800,
+                              letterSpacing: 0.5,
+                            ),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: AppColors.accentBlue,
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 13),
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                            elevation: 3,
+                          ),
+                        ),
+                        const SizedBox(height: 14),
+                        Row(
+                          children: [
+                            const Expanded(child: Divider(color: Colors.white24)),
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 8),
+                              child: Text(
+                                'O CON PIN DE SEGURIDAD',
+                                style: GoogleFonts.inter(
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w700,
+                                  color: AppColors.textMuted,
+                                  letterSpacing: 0.5,
+                                ),
+                              ),
+                            ),
+                            const Expanded(child: Divider(color: Colors.white24)),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                      Text(
+                        'Ingresa tu PIN secreto de seguridad (4 dígitos) para detener la transmisión de ubicación.',
+                        style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
+                      ),
+                      const SizedBox(height: 14),
+                      TextField(
+                        controller: pinController,
+                        keyboardType: TextInputType.number,
+                        maxLength: 4,
+                        obscureText: true,
+                        obscuringCharacter: '•',
+                        textAlign: TextAlign.center,
+                        style: GoogleFonts.inter(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 8,
+                          color: Colors.white,
+                        ),
+                        decoration: InputDecoration(
+                          hintText: '••••',
+                          counterText: '',
+                          hintStyle: GoogleFonts.inter(letterSpacing: 4, color: AppColors.textMuted),
+                          prefixIcon: const Icon(Icons.pin, color: AppColors.accentOrange, size: 18),
+                          errorText: errorMessage,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.of(dialogContext).pop(),
                     child: Text(
-                      'Desactivar Transmisión',
+                      'CANCELAR',
                       style: GoogleFonts.inter(
-                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: AppColors.textSecondary,
+                      ),
+                    ),
+                  ),
+                  ElevatedButton(
+                    onPressed: () async {
+                      final pin = pinController.text.trim();
+                      if (pin.isEmpty) {
+                        setDialogState(() {
+                          errorMessage = 'Ingresa tu PIN';
+                        });
+                        return;
+                      }
+                      final isValid = await SessionService.verifySecretPin(pin);
+                      if (!isValid) {
+                        setDialogState(() {
+                          errorMessage = 'PIN secreto incorrecto';
+                        });
+                        return;
+                      }
+                      await trackingService.stopTracking();
+                      if (dialogContext.mounted) {
+                        Navigator.of(dialogContext).pop();
+                      }
+                      if (context.mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text(
+                              'Transmisión de ubicación en tiempo real finalizada.',
+                              style: GoogleFonts.inter(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                            backgroundColor: const Color(0xFF1E293B),
+                            behavior: SnackBarBehavior.floating,
+                            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                          ),
+                        );
+                      }
+                    },
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppColors.primaryRed,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    ),
+                    child: Text(
+                      'DESACTIVAR',
+                      style: GoogleFonts.inter(
                         fontWeight: FontWeight.bold,
                         color: Colors.white,
                       ),
                     ),
                   ),
                 ],
-              ),
-              content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    'Ingresa tu PIN secreto de seguridad (4 dígitos) para detener la transmisión de ubicación.',
-                    style: GoogleFonts.inter(fontSize: 13, color: AppColors.textSecondary),
-                  ),
-                  const SizedBox(height: 16),
-                  TextField(
-                    controller: pinController,
-                    keyboardType: TextInputType.number,
-                    maxLength: 4,
-                    obscureText: true,
-                    obscuringCharacter: '•',
-                    textAlign: TextAlign.center,
-                    style: GoogleFonts.inter(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      letterSpacing: 8,
-                      color: Colors.white,
-                    ),
-                    decoration: InputDecoration(
-                      hintText: '••••',
-                      counterText: '',
-                      hintStyle: GoogleFonts.inter(letterSpacing: 4, color: AppColors.textMuted),
-                      prefixIcon: const Icon(Icons.pin, color: AppColors.accentOrange, size: 18),
-                      errorText: errorMessage,
-                    ),
-                  ),
-                ],
-              ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.of(dialogContext).pop(),
-                  child: Text(
-                    'CANCELAR',
-                    style: GoogleFonts.inter(
-                      fontWeight: FontWeight.bold,
-                      color: AppColors.textSecondary,
-                    ),
-                  ),
-                ),
-                ElevatedButton(
-                  onPressed: () async {
-                    final pin = pinController.text.trim();
-                    if (pin.isEmpty) {
-                      setDialogState(() {
-                        errorMessage = 'Ingresa tu PIN';
-                      });
-                      return;
-                    }
-                    final isValid = await SessionService.verifySecretPin(pin);
-                    if (!isValid) {
-                      setDialogState(() {
-                        errorMessage = 'PIN secreto incorrecto';
-                      });
-                      return;
-                    }
-                    await trackingService.stopTracking();
-                    if (dialogContext.mounted) {
-                      Navigator.of(dialogContext).pop();
-                    }
-                    if (context.mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        SnackBar(
-                          content: Text(
-                            'Transmisión de ubicación en tiempo real finalizada.',
-                            style: GoogleFonts.inter(
-                              color: Colors.white,
-                              fontWeight: FontWeight.w600,
-                            ),
-                          ),
-                          backgroundColor: const Color(0xFF1E293B),
-                          behavior: SnackBarBehavior.floating,
-                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                        ),
-                      );
-                    }
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: AppColors.primaryRed,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-                  ),
-                  child: Text(
-                    'DESACTIVAR',
-                    style: GoogleFonts.inter(
-                      fontWeight: FontWeight.bold,
-                      color: Colors.white,
-                    ),
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
+              );
+            },
+          );
+        },
+      );
     } finally {
       _isStopTrackingDialogOpen = false;
     }
@@ -625,9 +730,9 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
                           width: double.infinity,
                           child: ElevatedButton.icon(
                             onPressed: () => _showStopTrackingDialog(context, trackingService),
-                            icon: const Icon(Icons.lock_outline, size: 15, color: Colors.white),
+                            icon: const Icon(Icons.fingerprint, size: 16, color: Colors.white),
                             label: Text(
-                              'DESACTIVAR TRANSMISIÓN (REQUIERE PIN)',
+                              'DESACTIVAR TRANSMISIÓN (HUELLA O PIN)',
                               style: GoogleFonts.inter(fontSize: 11, fontWeight: FontWeight.bold),
                             ),
                             style: ElevatedButton.styleFrom(

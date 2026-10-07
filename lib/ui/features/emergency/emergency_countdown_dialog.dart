@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/services/whatsapp_api_service.dart';
@@ -65,6 +66,9 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
   final _pinController = TextEditingController();
   late AnimationController _pulseController;
   bool _canUseBiometrics = false;
+  bool _hasTriggeredSend = false;
+  Position? _preFetchedPosition;
+  Future<Position?>? _locationFuture;
 
   @override
   void initState() {
@@ -73,6 +77,18 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
       vsync: this,
       duration: const Duration(milliseconds: 1000),
     )..repeat(reverse: true);
+
+    // Iniciar pre-fijación satelital GPS inmediatamente desde el segundo 0
+    _locationFuture = GpsLocationService.getCurrentLocation().then((pos) {
+      if (mounted && pos != null) {
+        setState(() {
+          _preFetchedPosition = pos;
+        });
+      } else {
+        _preFetchedPosition = pos;
+      }
+      return pos;
+    }).catchError((_) => null);
 
     _checkBiometrics();
     _startTimer();
@@ -102,19 +118,49 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
   }
 
   void _onAutoSend() async {
+    if (_hasTriggeredSend) return;
+    _hasTriggeredSend = true;
     _timer?.cancel();
     final parentContext = context;
     Navigator.of(parentContext).pop();
 
-    if (widget.isDirectWhatsAppApi) {
-      // Capturar posición GPS real del dispositivo
-      final position = await GpsLocationService.getCurrentLocation();
-      final double lat = position?.latitude ?? -13.71450;
-      final double lon = position?.longitude ?? -76.20320;
-      final String address = position != null 
-          ? 'Ubicación móvil GPS (Pisco)'
-          : 'Pisco, Ica - Ubicación móvil';
+    final isRobo = widget.alertType.trim().toUpperCase() == 'ROBO';
+    final isSecuestro = widget.alertType.trim().toUpperCase() == 'SECUESTRO';
+    final hasLiveTracking = isRobo || isSecuestro;
 
+    // 1. Obtener la posición satelital (pre-fijada durante los 5 segundos de cuenta regresiva)
+    Position? position = _preFetchedPosition;
+    if (position == null && _locationFuture != null) {
+      try {
+        position = await _locationFuture!.timeout(const Duration(seconds: 2));
+      } catch (_) {}
+    }
+    position ??= await GpsLocationService.getCurrentLocation();
+
+    // 2. Si no hay GPS en vivo, usar la última ubicación real persistida por el dispositivo
+    final cached = await GpsLocationService.getCachedRealCoordinates();
+    final double lat = position?.latitude ?? (cached?['lat'] as double?) ?? -13.71450;
+    final double lon = position?.longitude ?? (cached?['lon'] as double?) ?? -76.20320;
+
+    String address = (cached?['address'] as String?) ?? 'Pisco, Ica - Ubicación móvil';
+    if (position != null) {
+      final realStreet = await GpsLocationService.getAddressFromCoordinates(lat, lon);
+      address = realStreet != null
+          ? '$realStreet (±${position.accuracy.toStringAsFixed(1)}m)'
+          : 'Ubicación móvil GPS (±${position.accuracy.toStringAsFixed(1)}m)';
+    }
+
+    // 3. Encendido instantáneo del rastreo GPS en vivo con la posición real
+    if (hasLiveTracking) {
+      final provisionalId = 'ALT-${DateTime.now().millisecondsSinceEpoch}';
+      LocationTrackingService().startTracking(
+        alertId: provisionalId,
+        initialLat: lat,
+        initialLon: lon,
+      );
+    }
+
+    if (widget.isDirectWhatsAppApi) {
       // Envío automático vía API sin abrir el formulario ni la app de WhatsApp
       final alertId = await WhatsAppApiService.sendAutomatedEmergencyAlert(
         category: widget.alertType,
@@ -125,15 +171,8 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
         address: address,
       );
 
-      final isRobo = widget.alertType.trim().toUpperCase() == 'ROBO';
-      final isSecuestro = widget.alertType.trim().toUpperCase() == 'SECUESTRO';
-      final hasLiveTracking = isRobo || isSecuestro;
       if (hasLiveTracking && alertId != null) {
-        LocationTrackingService().startTracking(
-          alertId: alertId,
-          initialLat: lat,
-          initialLon: lon,
-        );
+        LocationTrackingService().updateAlertId(alertId);
       }
 
       if (parentContext.mounted) {
@@ -235,6 +274,7 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
     }
 
     _timer?.cancel();
+    LocationTrackingService().stopTracking();
     HardwareTriggerService().cancelEmergency();
     if (!mounted) return;
     Navigator.of(context).pop();
@@ -262,6 +302,7 @@ class _EmergencyCountdownDialogState extends State<EmergencyCountdownDialog>
 
     if (authenticated) {
       _timer?.cancel();
+      LocationTrackingService().stopTracking();
       HardwareTriggerService().cancelEmergency();
       if (!mounted) return;
       Navigator.of(context).pop();

@@ -23,8 +23,8 @@ class SessionService {
   /// Guarda la sesión del ciudadano en almacenamiento seguro encriptado
   static Future<void> saveSession({
     required String dni,
-    String name = 'Carlos Mendoza Ruiz',
-    String phone = '+51 999 999 999',
+    String name = 'Ciudadano',
+    String phone = '',
     String? secretPin,
     String? jwtToken,
     int? idPersona,
@@ -78,7 +78,13 @@ class SessionService {
   /// Verifica si el usuario tiene una sesión activa previa
   static Future<bool> isLoggedIn() async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getBool(_keyIsLoggedIn) ?? false;
+    final isLogged = prefs.getBool(_keyIsLoggedIn) ?? false;
+    if (isLogged) return true;
+    final dni = prefs.getString(_keyUserDni);
+    if (dni != null && dni.trim().isNotEmpty) return true;
+    final lastDni = prefs.getString(_keyLastDni);
+    if (lastDni != null && lastDni.trim().isNotEmpty) return true;
+    return false;
   }
 
   /// Obtiene el token JWT único emitido por el backend (HU-SEG-02)
@@ -145,9 +151,9 @@ class SessionService {
   static Future<Map<String, String>> getUserData() async {
     final prefs = await SharedPreferences.getInstance();
     return {
-      'dni': prefs.getString(_keyUserDni) ?? '12345678',
-      'name': prefs.getString(_keyUserName) ?? 'Carlos Mendoza Ruiz',
-      'phone': prefs.getString(_keyUserPhone) ?? '+51 999 999 999',
+      'dni': prefs.getString(_keyUserDni) ?? '',
+      'name': prefs.getString(_keyUserName) ?? 'Ciudadano',
+      'phone': prefs.getString(_keyUserPhone) ?? '',
     };
   }
 

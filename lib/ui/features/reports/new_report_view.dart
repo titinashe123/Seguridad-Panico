@@ -23,6 +23,7 @@ class _NewReportViewState extends State<NewReportView> {
   String _currentAddress = 'Obteniendo GPS del dispositivo...';
   double _lat = -13.71450;
   double _lon = -76.20320;
+  double? _accuracy;
   bool _isRefreshingGps = false;
   bool _isSubmitting = false;
 
@@ -50,16 +51,19 @@ class _NewReportViewState extends State<NewReportView> {
       final position = await GpsLocationService.getCurrentLocation();
       if (mounted) {
         if (position != null) {
+          final address = await GpsLocationService.getAddressFromCoordinates(position.latitude, position.longitude);
+          if (!mounted) return;
           setState(() {
             _lat = position.latitude;
             _lon = position.longitude;
-            _currentAddress = 'GPS Satelital Activo (Pisco)';
+            _accuracy = position.accuracy;
+            _currentAddress = address ?? 'GPS Satelital Activo (Pisco)';
             _isRefreshingGps = false;
           });
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Ubicación GPS exacta del dispositivo obtenida con éxito.',
+                'GPS Satelital fijado (Margen: ±${position.accuracy.toStringAsFixed(1)}m)',
                 style: GoogleFonts.inter(
                   color: Colors.white,
                   fontWeight: FontWeight.w600,
@@ -621,10 +625,10 @@ class _NewReportViewState extends State<NewReportView> {
                                 ),
                                 const SizedBox(height: 4),
                                 Text(
-                                  'Lat: ${_lat.toStringAsFixed(5)}, Lon: ${_lon.toStringAsFixed(5)}',
+                                  'Lat: ${_lat.toStringAsFixed(5)}, Lon: ${_lon.toStringAsFixed(5)}${_accuracy != null ? " • ±${_accuracy!.toStringAsFixed(1)}m" : ""}',
                                   style: GoogleFonts.chakraPetch(
                                     fontSize: 11,
-                                    color: AppColors.textSecondary,
+                                    color: _accuracy != null && _accuracy! <= 15 ? AppColors.accentGreen : AppColors.textSecondary,
                                     letterSpacing: 0.5,
                                   ),
                                 ),

@@ -1,10 +1,14 @@
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/services/app_lock_service.dart';
 import '../../../data/services/auth_service.dart';
+import '../../../data/services/biometric_auth_service.dart';
+import '../../../data/services/hardware_trigger_service.dart';
 import '../../../data/services/reniec_service.dart';
+import '../../../data/services/session_service.dart';
 import '../navigation/main_layout_view.dart';
 
 class RegisterView extends StatefulWidget {
@@ -26,7 +30,7 @@ class _RegisterViewState extends State<RegisterView> {
 
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
-  bool _acceptTerms = true;
+  bool _acceptTerms = false;
   bool _isLoading = false;
 
   @override
@@ -91,7 +95,7 @@ class _RegisterViewState extends State<RegisterView> {
       return;
     }
     if (!_acceptTerms) {
-      _showError('Debe aceptar las políticas de privacidad para continuar.');
+      _showError('Debe aceptar las Políticas de Privacidad y Términos de Uso para continuar con el registro.');
       return;
     }
 
@@ -302,7 +306,11 @@ class _RegisterViewState extends State<RegisterView> {
                           Navigator.of(dialogCtx).pop();
 
                           if (regResult.success) {
-                            if (!mounted) return;
+                            await BiometricAuthService.enrollUser(dni: dni);
+                            await SessionService.saveLastDni(dni);
+                            await HardwareTriggerService().startBackgroundService();
+                            AppLockService().markJustLoggedIn();
+                            if (!context.mounted) return;
                             ScaffoldMessenger.of(context).showSnackBar(
                               SnackBar(
                                 content: Text(
@@ -319,7 +327,6 @@ class _RegisterViewState extends State<RegisterView> {
                                 duration: const Duration(seconds: 2),
                               ),
                             );
-                            AppLockService().markJustLoggedIn();
                             Navigator.of(context).pushAndRemoveUntil(
                               MaterialPageRoute(builder: (_) => const MainLayoutView()),
                               (route) => false,
@@ -348,6 +355,214 @@ class _RegisterViewState extends State<RegisterView> {
           },
         );
       },
+    );
+  }
+
+  void _showPrivacyPolicyDialog() {
+    showDialog(
+      context: context,
+      builder: (dialogCtx) {
+        return Dialog(
+          backgroundColor: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+            side: const BorderSide(color: AppColors.border, width: 1),
+          ),
+          insetPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 24),
+          child: Container(
+            constraints: const BoxConstraints(maxWidth: 520, maxHeight: 600),
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                // Header
+                Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: AppColors.primaryRed.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.shield_outlined,
+                        color: AppColors.primaryRed,
+                        size: 22,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'Términos y Política de Privacidad',
+                            style: GoogleFonts.inter(
+                              color: Colors.white,
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                          Text(
+                            'Alerta Ciudadana • Ley N° 29733 (Perú)',
+                            style: GoogleFonts.inter(
+                              color: AppColors.textMuted,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: AppColors.textSecondary, size: 20),
+                      onPressed: () => Navigator.of(dialogCtx).pop(),
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                const Divider(color: AppColors.border, height: 1),
+                const SizedBox(height: 14),
+
+                // Contenido desplazable
+                Expanded(
+                  child: RawScrollbar(
+                    thumbColor: AppColors.border,
+                    radius: const Radius.circular(4),
+                    thickness: 4,
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          _buildPolicySection(
+                            '1. Identificación y Finalidad del Servicio',
+                            'La aplicación móvil "Alerta Ciudadana" es una plataforma comunitaria de auxilio, prevención y reporte de incidencias para la seguridad vecinal, conectada a la Central de Serenazgo y Video Vigilancia.\n\nSu propósito exclusivo es salvaguardar la vida, integridad física y patrimonio de los ciudadanos mediante la emisión de alertas de emergencia y coordinación directa con las fuerzas del orden (Serenazgo y Policía Nacional del Perú - PNP).',
+                          ),
+                          _buildPolicySection(
+                            '2. Datos Personales Recopilados',
+                            'En estricto cumplimiento de la Ley N° 29733 (Ley de Protección de Datos Personales del Perú) y su Reglamento, se recopilan únicamente los siguientes datos esenciales:\n'
+                            '• Documento Nacional de Identidad (DNI) y dígito verificador para cotejo de autenticidad ante el Registro Nacional de Identificación y Estado Civil (RENIEC).\n'
+                            '• Nombres, apellidos y número de teléfono celular para comunicación y auxilio en emergencias.\n'
+                            '• Contraseña de acceso y PIN secreto de 4 dígitos (encriptados en el dispositivo mediante Keystore/Keychain de alta seguridad).',
+                          ),
+                          _buildPolicySection(
+                            '3. Geolocalización en Tiempo Real y Rastreo',
+                            'Para que las unidades de auxilio puedan acudir al punto exacto de los hechos, el usuario autoriza el acceso a su ubicación GPS en los siguientes términos:\n'
+                            '• Transmisión precisa de coordenadas en tiempo real al activar una alerta de auxilio (Robo, Violencia, Accidente, Incendio o Emergencia Médica).\n'
+                            '• En caso de ROBO, se activará un protocolo de rastreo continuo en segundo plano ("Live Tracking") para guiar a las patrullas policiales o de serenazgo, el cual únicamente puede ser detenido ingresando su PIN secreto de 4 dígitos.',
+                          ),
+                          _buildPolicySection(
+                            '4. Sensores de Hardware y Segundo Plano',
+                            'La aplicación incorpora mecanismos autónomos de protección:\n'
+                            '• Detección de pulsación rápida (3 o más toques) del botón físico para pánico inmediato.\n'
+                            '• Sensores de movimiento (acelerómetro y giroscopio) para alertar tirones violentos o forcejeo (antirrobo).\n'
+                            'Estos sensores operan bajo un servicio en primer plano persistente respetando el uso eficiente de batería.',
+                          ),
+                          _buildPolicySection(
+                            '5. Confidencialidad y Seguridad',
+                            'Los datos personales no serán compartidos, comercializados ni cedidos a ninguna empresa, entidad privada o tercero para fines comerciales ni publicitarios.\n\nLa información se transfiere mediante protocolos cifrados (HTTPS / SSL) y solo podrá ser visualizada por los operadores autorizados de la Central de Seguridad Ciudadana o remitida al Ministerio Público o PNP si media investigación judicial.',
+                          ),
+                          _buildPolicySection(
+                            '6. Compromiso de Buen Uso y Sanciones',
+                            'El usuario se compromete formalmente a utilizar la aplicación de manera responsable y veraz. Queda estrictamente prohibida la emisión de alertas falsas, bromas o reportes malintencionados.\n\nEl uso negligente o doloso que movilice innecesariamente a las fuerzas de seguridad podrá acarrear la cancelación definitiva de la cuenta, así como las sanciones administrativas y penales previstas en el marco legal peruano.',
+                          ),
+                          _buildPolicySection(
+                            '7. Ejercicio de Derechos ARCO',
+                            'El titular de los datos personales puede ejercer en cualquier momento sus derechos de Acceso, Rectificación, Cancelación y Oposición (ARCO) comunicándose con los canales oficiales de soporte de la Central de Seguridad Ciudadana.',
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 14),
+                const Divider(color: AppColors.border, height: 1),
+                const SizedBox(height: 14),
+
+                // Botones de acción
+                Row(
+                  children: [
+                    Expanded(
+                      child: OutlinedButton(
+                        onPressed: () => Navigator.of(dialogCtx).pop(),
+                        style: OutlinedButton.styleFrom(
+                          side: const BorderSide(color: AppColors.border),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        child: Text(
+                          'CERRAR',
+                          style: GoogleFonts.inter(
+                            color: AppColors.textSecondary,
+                            fontWeight: FontWeight.w600,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      flex: 2,
+                      child: ElevatedButton(
+                        onPressed: () {
+                          setState(() {
+                            _acceptTerms = true;
+                          });
+                          Navigator.of(dialogCtx).pop();
+                        },
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppColors.primaryRed,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        ),
+                        child: Text(
+                          'ACEPTAR POLÍTICA',
+                          style: GoogleFonts.inter(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPolicySection(String title, String body) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: GoogleFonts.inter(
+              color: AppColors.primaryRed,
+              fontWeight: FontWeight.bold,
+              fontSize: 12,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            body,
+            style: GoogleFonts.inter(
+              color: AppColors.textSecondary,
+              fontSize: 11.5,
+              height: 1.45,
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -702,35 +917,35 @@ class _RegisterViewState extends State<RegisterView> {
                         ),
                         const SizedBox(width: 10),
                         Expanded(
-                          child: GestureDetector(
-                            onTap: () {
-                              setState(() {
-                                _acceptTerms = !_acceptTerms;
-                              });
-                            },
-                            child: RichText(
-                              text: TextSpan(
-                                text: 'Acepto la ',
-                                style: GoogleFonts.inter(
-                                  fontSize: 12,
-                                  color: AppColors.textSecondary,
-                                  height: 1.4,
-                                ),
-                                children: [
-                                  TextSpan(
-                                    text: 'Política de Privacidad',
-                                    style: GoogleFonts.inter(
-                                      color: AppColors.primaryRed,
-                                      fontWeight: FontWeight.w600,
-                                      decoration: TextDecoration.underline,
-                                      decorationColor: AppColors.primaryRed,
-                                    ),
-                                  ),
-                                  const TextSpan(
-                                    text: ' y al tratamiento de mis datos personales',
-                                  ),
-                                ],
+                          child: Text.rich(
+                            TextSpan(
+                              text: 'Acepto la ',
+                              style: GoogleFonts.inter(
+                                fontSize: 12,
+                                color: AppColors.textSecondary,
+                                height: 1.4,
                               ),
+                              children: [
+                                TextSpan(
+                                  text: 'Política de Privacidad',
+                                  style: GoogleFonts.inter(
+                                    color: AppColors.primaryRed,
+                                    fontWeight: FontWeight.w600,
+                                    decoration: TextDecoration.underline,
+                                    decorationColor: AppColors.primaryRed,
+                                  ),
+                                  recognizer: TapGestureRecognizer()..onTap = _showPrivacyPolicyDialog,
+                                ),
+                                TextSpan(
+                                  text: ' y al tratamiento de mis datos personales',
+                                  recognizer: TapGestureRecognizer()
+                                    ..onTap = () {
+                                      setState(() {
+                                        _acceptTerms = !_acceptTerms;
+                                      });
+                                    },
+                                ),
+                              ],
                             ),
                           ),
                         ),

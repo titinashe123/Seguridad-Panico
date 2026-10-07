@@ -165,11 +165,13 @@ class ReportStorageService {
             mergedMap[idKey] = r;
           }
 
-          // Agregar o sobreescribir los locales no sincronizados o pendientes del usuario
+          // Solo mantener locales que sean borradores pendientes nunca sincronizados (sin id_reporte y is_synced == false).
+          // Cualquier reporte que tenga id_reporte pero ya no exista en Supabase fue eliminado en la nube y se purga definitivamente de la caché local.
           for (final l in localList) {
             final isSynced = l['is_synced'] == true;
-            final idKey = l['id_reporte'] != null ? 'REP-${l['id_reporte']}' : 'LOC-${l['fecha_hora']}';
-            if (!isSynced || !mergedMap.containsKey(idKey)) {
+            final hasRemoteId = l['id_reporte'] != null;
+            if (!isSynced && !hasRemoteId) {
+              final idKey = 'LOC-${l['fecha_hora']}';
               mergedMap[idKey] = l;
             }
           }
@@ -250,8 +252,8 @@ class ReportStorageService {
       'id_persona': idPersona,
       'dni': dni,
       'tipo_incidencia': {'nombre': category.trim().toUpperCase()},
-      'id_estado': isSuccessfullyDispatched ? 1 : 2,
-      'estado_reporte': {'nombre': isSuccessfullyDispatched ? 'Enviado' : 'No enviado'},
+      'id_estado': 1,
+      'estado_reporte': {'nombre': 'Pendiente'},
       'fecha_hora': nowIso,
       'descripcion': message,
       'direccion_texto': address,
@@ -286,7 +288,7 @@ class ReportStorageService {
       Map<String, dynamic> remotePayload = {
         'id_persona': targetIdPersona,
         'id_tipo': idTipo,
-        'id_estado': isSuccessfullyDispatched ? 1 : 2,
+        'id_estado': 1,
         'fecha_hora': nowIso,
         'descripcion': message,
         'direccion_texto': address,

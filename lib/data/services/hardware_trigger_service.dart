@@ -1,5 +1,7 @@
 import 'dart:developer' as developer;
 import 'package:flutter/services.dart';
+import '../../main.dart';
+import '../../ui/features/emergency/emergency_countdown_dialog.dart';
 
 typedef HardwareTriggerCallback = void Function(String source, [String? alertType]);
 typedef EmergencyDispatchedCallback = void Function(String alertType, String source, [bool nativeSuccess]);
@@ -50,7 +52,20 @@ class HardwareTriggerService {
           final String source = args?['source'] as String? ?? 'power_button_3x';
           final String? alertType = args?['alertType'] as String?;
           developer.log('🚨 DISPARO NATIVO DE EMERGENCIA: $source ($alertType)', name: 'HardwareTriggerService');
-          _onHardwareTriggered?.call(source, alertType);
+          if (_onHardwareTriggered != null) {
+            _onHardwareTriggered?.call(source, alertType);
+          } else if (appNavigatorKey.currentContext != null) {
+            final type = alertType ?? 'ROBO';
+            final label = source.contains('sensor')
+                ? 'SENSOR ANTIRROBO (ARREBATO / FORCEJEO)'
+                : 'BOTÓN FÍSICO (3+ PULSACIONES SEGUIDAS)';
+            EmergencyCountdownDialog.show(
+              appNavigatorKey.currentContext!,
+              alertType: type,
+              source: label,
+              isDirectWhatsAppApi: true,
+            );
+          }
           break;
 
         case 'onEmergencyDispatched':

@@ -24,6 +24,10 @@ class AppLockService {
   /// acaba de iniciar sesión o registrarse desde LoginView.
   bool justLoggedIn = false;
 
+  /// Bandera de período de gracia (4s) para evitar que el cierre del diálogo
+  /// de huella digital de Android vuelva a bloquear la app inmediatamente.
+  bool justUnlocked = false;
+
   DateTime? _pausedAt;
 
   /// Inicializa el estado de bloqueo al encender la app (cold start)
@@ -41,6 +45,10 @@ class AppLockService {
     developer.log('Desbloqueo de seguridad completado exitosamente', name: 'AppLockService');
     isLockedNotifier.value = false;
     _pausedAt = null;
+    justUnlocked = true;
+    Future.delayed(const Duration(seconds: 4), () {
+      justUnlocked = false;
+    });
   }
 
   /// Marca que el usuario acaba de iniciar sesión con credenciales
@@ -56,6 +64,7 @@ class AppLockService {
   /// Se ejecuta cuando la aplicación pasa a segundo plano o se bloquea la pantalla
   void onAppPaused() {
     if (isAuthenticatingBiometrics) return;
+    if (justUnlocked) return;
     _pausedAt = DateTime.now();
   }
 
@@ -63,6 +72,10 @@ class AppLockService {
   Future<void> onAppResumed() async {
     if (isAuthenticatingBiometrics) return;
     if (justLoggedIn) return;
+    if (justUnlocked) {
+      _pausedAt = null;
+      return;
+    }
 
     final loggedIn = await SessionService.isLoggedIn();
     if (!loggedIn) {
@@ -85,6 +98,7 @@ class AppLockService {
   void onLogout() {
     isLockedNotifier.value = false;
     justLoggedIn = false;
+    justUnlocked = false;
     _pausedAt = null;
   }
 }

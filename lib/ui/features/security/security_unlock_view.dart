@@ -4,10 +4,10 @@ import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 import '../../../core/theme/app_theme.dart';
 import '../../../data/services/app_lock_service.dart';
+import '../../../data/services/auth_service.dart';
 import '../../../data/services/biometric_auth_service.dart';
 import '../../../data/services/session_service.dart';
-import '../../../main.dart';
-import '../auth/login_view.dart';
+
 
 /// Pantalla de Bloqueo de Seguridad
 /// Se superpone inmediatamente al regresar de segundo plano o abrir la aplicación con sesión iniciada.
@@ -49,8 +49,40 @@ class _SecurityUnlockViewState extends State<SecurityUnlockView> with SingleTick
 
   Future<void> _loadUser() async {
     final data = await SessionService.getUserData();
-    final fullName = data['name'] ?? 'Ciudadano';
-    final rawDni = data['dni'] ?? '';
+    var fullName = data['name'] ?? 'Ciudadano';
+    var rawDni = data['dni'] ?? '';
+
+    // Si el DNI no está en la sesión actual, consultar el último DNI o el DNI biométrico
+    if (rawDni.isEmpty) {
+      final lastDni = await SessionService.getLastDni();
+      final enrolledDni = await BiometricAuthService.getEnrolledDni();
+      rawDni = (lastDni != null && lastDni.isNotEmpty)
+          ? lastDni
+          : (enrolledDni ?? '');
+    }
+
+    // Si el nombre no está configurado o es el predeterminado 'Ciudadano', buscar los datos reales del usuario
+    if (rawDni.isNotEmpty && (fullName.isEmpty || fullName == 'Ciudadano')) {
+      final user = await AuthService.findUserByDni(rawDni);
+      if (user != null) {
+        final nombres = (user['nombres'] ?? '').toString().trim();
+        final apellidos = (user['apellidos'] ?? '').toString().trim();
+        final foundName = '$nombres $apellidos'.trim();
+        if (foundName.isNotEmpty) {
+          fullName = foundName;
+          await SessionService.saveSession(
+            dni: rawDni,
+            name: fullName,
+            phone: (user['telefono'] ?? user['phone'] ?? '').toString(),
+            secretPin: user['pin_hash']?.toString(),
+            idPersona: user['id_persona'] is int
+                ? user['id_persona'] as int
+                : int.tryParse(user['id_persona']?.toString() ?? ''),
+          );
+        }
+      }
+    }
+
     final firstName = fullName.trim().split(' ').first;
 
     if (mounted) {
@@ -73,7 +105,7 @@ class _SecurityUnlockViewState extends State<SecurityUnlockView> with SingleTick
     if (available) {
       // Pequeño retardo para dar tiempo a la vista a renderizarse
       await Future.delayed(const Duration(milliseconds: 300));
-      if (mounted && AppLockService().isLocked) {
+      if (mounted && AppLockService().isLocked && !AppLockService().justUnlocked) {
         _authenticateWithBiometrics();
       }
     }
@@ -81,6 +113,7 @@ class _SecurityUnlockViewState extends State<SecurityUnlockView> with SingleTick
 
   Future<void> _authenticateWithBiometrics() async {
     if (_isAuthenticatingBiometrics) return;
+    if (AppLockService().justUnlocked) return;
     setState(() {
       _isAuthenticatingBiometrics = true;
       _errorMessage = null;
@@ -98,6 +131,8 @@ class _SecurityUnlockViewState extends State<SecurityUnlockView> with SingleTick
     } catch (e) {
       developer.log('Error en autenticación biométrica: $e', name: 'SecurityUnlockView');
     } finally {
+      // Pequeño retardo para dar tiempo a que Android termine de procesar el cierre del diálogo del sistema
+      await Future.delayed(const Duration(milliseconds: 300));
       AppLockService().isAuthenticatingBiometrics = false;
       if (mounted) {
         setState(() => _isAuthenticatingBiometrics = false);
@@ -144,52 +179,6 @@ class _SecurityUnlockViewState extends State<SecurityUnlockView> with SingleTick
         _pin = '';
       });
     }
-  }
-
-  void _confirmLogout() {
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppColors.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-          side: const BorderSide(color: AppColors.border),
-        ),
-        title: Row(
-          children: [
-            const Icon(Icons.logout_rounded, color: AppColors.primaryRed, size: 24),
-            const SizedBox(width: 8),
-            Text(
-              '¿Cerrar Sesión?',
-              style: GoogleFonts.inter(fontWeight: FontWeight.bold, color: Colors.white, fontSize: 16),
-            ),
-          ],
-        ),
-        content: Text(
-          'Para cambiar de usuario deberás ingresar tu DNI y contraseña nuevamente.',
-          style: GoogleFonts.inter(color: AppColors.textSecondary, fontSize: 13),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: Text('CANCELAR', style: GoogleFonts.inter(color: Colors.white70)),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              Navigator.pop(ctx);
-              await SessionService.clearSession();
-              AppLockService().onLogout();
-              appNavigatorKey.currentState?.pushAndRemoveUntil(
-                MaterialPageRoute(builder: (_) => const LoginView()),
-                (route) => false,
-              );
-            },
-            style: ElevatedButton.styleFrom(backgroundColor: AppColors.primaryRed),
-            child: Text('CERRAR SESIÓN', style: GoogleFonts.inter(color: Colors.white, fontWeight: FontWeight.bold)),
-          ),
-        ],
-      ),
-    );
   }
 
   @override
@@ -397,22 +386,7 @@ class _SecurityUnlockViewState extends State<SecurityUnlockView> with SingleTick
                           ],
                         ),
 
-                        // Pie de pantalla: Opción para cambiar de cuenta
-                        Padding(
-                          padding: const EdgeInsets.only(top: 16, bottom: 8),
-                          child: TextButton.icon(
-                            onPressed: _confirmLogout,
-                            icon: const Icon(Icons.swap_horiz_rounded, size: 16, color: AppColors.textMuted),
-                            label: Text(
-                              '¿No eres tú? Cambiar de usuario',
-                              style: GoogleFonts.inter(
-                                fontSize: 12,
-                                fontWeight: FontWeight.w600,
-                                color: AppColors.textMuted,
-                              ),
-                            ),
-                          ),
-                        ),
+                        const SizedBox(height: 8),
                       ],
                     ),
                   ),
