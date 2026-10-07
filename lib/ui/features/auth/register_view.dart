@@ -83,7 +83,7 @@ class _RegisterViewState extends State<RegisterView> {
       return;
     }
     if (password != confirmPassword) {
-      _showError('Las contraseñas no coinciden.');
+      _showError('Contraseña incorrecta');
       return;
     }
     if (pin.isEmpty || pin.length != 4) {
@@ -605,6 +605,11 @@ class _RegisterViewState extends State<RegisterView> {
                     TextField(
                       controller: _passwordController,
                       obscureText: _obscurePassword,
+                      onChanged: (_) {
+                        if (_confirmPasswordController.text.isNotEmpty) {
+                          setState(() {});
+                        }
+                      },
                       style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
                       decoration: InputDecoration(
                         hintText: '••••••••',
@@ -630,9 +635,14 @@ class _RegisterViewState extends State<RegisterView> {
                     TextField(
                       controller: _confirmPasswordController,
                       obscureText: _obscureConfirmPassword,
+                      onChanged: (_) => setState(() {}),
                       style: const TextStyle(fontSize: 14, color: AppColors.textPrimary),
                       decoration: InputDecoration(
                         hintText: '••••••••',
+                        errorText: (_confirmPasswordController.text.isNotEmpty &&
+                                _confirmPasswordController.text != _passwordController.text)
+                            ? 'Contraseña incorrecta'
+                            : null,
                         suffixIcon: IconButton(
                           icon: Icon(
                             _obscureConfirmPassword ? Icons.visibility_off_outlined : Icons.visibility_outlined,
