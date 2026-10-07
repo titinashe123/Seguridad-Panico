@@ -22,10 +22,13 @@ class _LoginViewState extends State<LoginView> {
   bool _obscurePassword = true;
   bool _isLoading = false;
   bool _canUseBiometrics = false;
+  bool _isBiometricsHardwareReady = false;
+  String? _enrolledDni;
 
   @override
   void initState() {
     super.initState();
+    _dniController.addListener(_onDniInputChanged);
     // Asegurar que si el usuario está en la vista de login, el servicio de pánico en segundo plano
     // y cualquier alarma pendiente queden completamente detenidos
     WidgetsBinding.instance.addPostFrameCallback((_) async {
@@ -35,22 +38,47 @@ class _LoginViewState extends State<LoginView> {
     });
   }
 
-  Future<void> _initBiometricsAndDni() async {
-    final lastDni = await SessionService.getLastDni();
-    if (lastDni != null && lastDni.isNotEmpty && mounted) {
-      _dniController.text = lastDni;
-    }
-    final canBio = await BiometricAuthService.isBiometricsReady();
-    final bioEnabled = await BiometricAuthService.isBiometricsEnabled();
-    if (mounted) {
+  void _onDniInputChanged() {
+    _updateBiometricState();
+  }
+
+  void _updateBiometricState() {
+    final currentDni = _dniController.text.trim();
+    final isMatchingEnrolled = _enrolledDni != null &&
+        _enrolledDni!.isNotEmpty &&
+        _enrolledDni == currentDni;
+
+    final nextCanUse = _isBiometricsHardwareReady && isMatchingEnrolled;
+    if (mounted && _canUseBiometrics != nextCanUse) {
       setState(() {
-        _canUseBiometrics = canBio && bioEnabled;
+        _canUseBiometrics = nextCanUse;
       });
     }
   }
 
+  Future<void> _initBiometricsAndDni() async {
+    final enrolled = await BiometricAuthService.getEnrolledDni();
+    _enrolledDni = enrolled;
+
+    if (enrolled != null && enrolled.isNotEmpty && mounted) {
+      _dniController.text = enrolled;
+    } else {
+      final lastDni = await SessionService.getLastDni();
+      if (lastDni != null && lastDni.isNotEmpty && mounted) {
+        _dniController.text = lastDni;
+      }
+    }
+
+    final canBio = await BiometricAuthService.isBiometricsReady();
+    final bioEnabled = await BiometricAuthService.isBiometricsEnabled();
+    _isBiometricsHardwareReady = canBio && bioEnabled;
+
+    _updateBiometricState();
+  }
+
   @override
   void dispose() {
+    _dniController.removeListener(_onDniInputChanged);
     _dniController.dispose();
     _passwordController.dispose();
     super.dispose();
@@ -103,6 +131,11 @@ class _LoginViewState extends State<LoginView> {
     setState(() => _isLoading = false);
 
     if (result.success) {
+      // SEGURIDAD: Vincular legítimamente este DNI al sensor de huella de este celular
+      await BiometricAuthService.enrollUser(dni: dni);
+      _enrolledDni = dni;
+      _updateBiometricState();
+
       // Iniciar el servicio nativo de segundo plano sólo tras verificar autenticación
       await HardwareTriggerService().startBackgroundService();
       if (!mounted) return;
@@ -146,6 +179,24 @@ class _LoginViewState extends State<LoginView> {
       return;
     }
 
+    // SEGURIDAD ESTRICTA: La huella solo puede desbloquear el DNI previamente autenticado en este dispositivo
+    final enrolled = await BiometricAuthService.getEnrolledDni();
+    if (!mounted) return;
+    if (enrolled == null || enrolled.isEmpty || enrolled != targetDni) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Esta huella no está vinculada al DNI $targetDni. Debe ingresar primero con la contraseña de esta cuenta.',
+            style: GoogleFonts.inter(fontWeight: FontWeight.w600, color: Colors.white),
+          ),
+          backgroundColor: AppColors.error,
+          behavior: SnackBarBehavior.floating,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        ),
+      );
+      return;
+    }
+
     final authenticated = await BiometricAuthService.authenticate(
       reason: 'Coloca tu huella digital para acceder a Alerta Ciudadana',
     );
@@ -156,9 +207,10 @@ class _LoginViewState extends State<LoginView> {
 
     setState(() => _isLoading = true);
 
-    // Si ya existe sesión activa localmente, entrar directamente
+    // Si ya existe sesión activa localmente para este mismo DNI, entrar directamente
     final isLogged = await SessionService.isLoggedIn();
-    if (isLogged) {
+    final sessionDni = (await SessionService.getUserData())['dni'];
+    if (isLogged && sessionDni == targetDni) {
       await HardwareTriggerService().startBackgroundService();
       if (!mounted) return;
       setState(() => _isLoading = false);
@@ -168,7 +220,7 @@ class _LoginViewState extends State<LoginView> {
       return;
     }
 
-    // Si no está la sesión activa, validar el DNI registrado
+    // Si no está la sesión en memoria, restaurar los datos del usuario vinculado
     final user = await AuthService.findUserByDni(targetDni);
     if (!mounted) return;
     setState(() => _isLoading = false);
@@ -844,6 +896,17 @@ class _LoginViewState extends State<LoginView> {
                             ),
                           ),
                         ],
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Center(
+                      child: Text(
+                        '🔒 Huella vinculada a esta cuenta en este dispositivo',
+                        style: GoogleFonts.inter(
+                          fontSize: 11,
+                          color: AppColors.textMuted,
+                          fontWeight: FontWeight.w500,
+                        ),
                       ),
                     ),
                   ],

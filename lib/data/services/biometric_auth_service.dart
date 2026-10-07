@@ -1,5 +1,6 @@
 import 'dart:developer' as developer;
 import 'package:flutter/services.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:local_auth/local_auth.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -7,7 +8,55 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Permite inicio de sesión rápido y cancelación de alertas sin digitar PIN
 class BiometricAuthService {
   static final LocalAuthentication _localAuth = LocalAuthentication();
+  static const FlutterSecureStorage _secureStorage = FlutterSecureStorage(
+    aOptions: AndroidOptions(encryptedSharedPreferences: true),
+    iOptions: IOSOptions(accessibility: KeychainAccessibility.first_unlock),
+  );
+
   static const String _keyBiometricsEnabled = 'app_biometrics_enabled_pref';
+  static const String _keyEnrolledDni = 'app_biometric_enrolled_dni';
+
+  /// Obtiene el DNI que fue vinculado legítimamente con contraseña a este dispositivo
+  static Future<String?> getEnrolledDni() async {
+    try {
+      final secureDni = await _secureStorage.read(key: _keyEnrolledDni);
+      if (secureDni != null && secureDni.isNotEmpty) {
+        return secureDni.trim();
+      }
+    } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    return prefs.getString(_keyEnrolledDni);
+  }
+
+  /// Vincula un DNI a la biometría del dispositivo tras una autenticación exitosa con contraseña
+  static Future<void> enrollUser({required String dni}) async {
+    final cleanDni = dni.trim();
+    if (cleanDni.isEmpty) return;
+
+    try {
+      await _secureStorage.write(key: _keyEnrolledDni, value: cleanDni);
+    } catch (_) {}
+
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_keyEnrolledDni, cleanDni);
+  }
+
+  /// Elimina la vinculación biométrica del dispositivo
+  static Future<void> removeEnrollment() async {
+    try {
+      await _secureStorage.delete(key: _keyEnrolledDni);
+    } catch (_) {}
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_keyEnrolledDni);
+  }
+
+  /// Verifica si el DNI proporcionado es el único autorizado para ingresar con biometría
+  static Future<bool> isUserEnrolledForBiometrics(String dni) async {
+    final cleanDni = dni.trim();
+    if (cleanDni.isEmpty) return false;
+    final enrolled = await getEnrolledDni();
+    return enrolled != null && enrolled.isNotEmpty && enrolled == cleanDni;
+  }
 
   /// Verifica si el hardware del dispositivo tiene lector biométrico y si el dispositivo es compatible
   static Future<bool> isHardwareAvailable() async {
