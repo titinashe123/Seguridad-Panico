@@ -4,7 +4,10 @@ import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 
+import 'package:flutter/material.dart';
+import 'package:google_fonts/google_fonts.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../core/theme/app_theme.dart';
 
 /// Servicio para obtención de ubicación GPS exacta en tiempo real del dispositivo
 class GpsLocationService {
@@ -164,5 +167,192 @@ class GpsLocationService {
     if (position == null) return fallback;
     final accuracyStr = ' (±${position.accuracy.toStringAsFixed(1)}m)';
     return 'Lat: ${position.latitude.toStringAsFixed(5)}, Lon: ${position.longitude.toStringAsFixed(5)}$accuracyStr';
+  }
+
+  /// Comprueba y solicita permisos proactivamente al registrarse o abrir la app por primera vez
+  static Future<bool> checkAndPromptLocationPermission(BuildContext context) async {
+    try {
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      LocationPermission permission = await Geolocator.checkPermission();
+
+      if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+        if (!serviceEnabled && context.mounted) {
+          _showEnableGpsDialog(context);
+          return false;
+        }
+        // Permiso ya concedido: pre-calentar GPS en segundo plano
+        getCurrentLocation();
+        return true;
+      }
+
+      if (!context.mounted) return false;
+
+      // Mostrar diálogo explicativo de seguridad antes de solicitar permiso nativo
+      final userWantsToAllow = await showDialog<bool>(
+        context: context,
+        barrierDismissible: false,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppColors.surface,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: const BorderSide(color: AppColors.border, width: 1.2),
+          ),
+          contentPadding: const EdgeInsets.all(24),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 64,
+                height: 64,
+                decoration: BoxDecoration(
+                  color: AppColors.primaryRed.withValues(alpha: 0.12),
+                  shape: BoxShape.circle,
+                  border: Border.all(color: AppColors.primaryRed.withValues(alpha: 0.35), width: 1.5),
+                ),
+                child: const Icon(
+                  Icons.location_on_rounded,
+                  color: AppColors.primaryRed,
+                  size: 34,
+                ),
+              ),
+              const SizedBox(height: 18),
+              Text(
+                'Protección Satelital y GPS',
+                style: GoogleFonts.inter(
+                  color: Colors.white,
+                  fontSize: 18,
+                  fontWeight: FontWeight.w800,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Para que la Policía y la Central de Serenazgo puedan auxiliarte con precisión milimétrica ante un robo o emergencia, Alerta Ciudadana necesita acceder a tu ubicación.',
+                style: GoogleFonts.inter(
+                  color: AppColors.textSecondary,
+                  fontSize: 13,
+                  height: 1.45,
+                ),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: AppColors.surfaceElevated,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: AppColors.borderSubtle),
+                ),
+                child: Column(
+                  children: [
+                    _buildPermissionBenefit(Icons.bolt_rounded, 'Despacho táctico en tiempo real al pulsar SOS'),
+                    const SizedBox(height: 8),
+                    _buildPermissionBenefit(Icons.phone_android_rounded, 'Localización satelital por 3 toques del botón físico'),
+                    const SizedBox(height: 8),
+                    _buildPermissionBenefit(Icons.shield_outlined, 'Rastreo en vivo de la víctima ante asalto callejero'),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 22),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () => Navigator.of(ctx).pop(true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primaryRed,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    elevation: 0,
+                  ),
+                  child: Text(
+                    'PERMITIR UBICACIÓN GPS',
+                    style: GoogleFonts.inter(fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 0.5),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop(false),
+                child: Text(
+                  'Ahora no',
+                  style: GoogleFonts.inter(color: AppColors.textMuted, fontSize: 13, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+      if (userWantsToAllow == true) {
+        if (permission == LocationPermission.deniedForever) {
+          await Geolocator.openAppSettings();
+          return false;
+        }
+
+        permission = await Geolocator.requestPermission();
+        if (permission == LocationPermission.always || permission == LocationPermission.whileInUse) {
+          if (!serviceEnabled && context.mounted) {
+            _showEnableGpsDialog(context);
+          } else {
+            getCurrentLocation(); // Pre-calentar satélites
+          }
+          return true;
+        }
+      }
+    } catch (e) {
+      developer.log('Error verificando permisos de ubicación: $e', name: 'GpsLocationService');
+    }
+    return false;
+  }
+
+  static Widget _buildPermissionBenefit(IconData icon, String text) {
+    return Row(
+      children: [
+        Icon(icon, color: AppColors.accentGreen, size: 16),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            text,
+            style: GoogleFonts.inter(color: Colors.white70, fontSize: 11.5, fontWeight: FontWeight.w500),
+          ),
+        ),
+      ],
+    );
+  }
+
+  static void _showEnableGpsDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surface,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Row(
+          children: [
+            const Icon(Icons.location_disabled_rounded, color: AppColors.warning, size: 22),
+            const SizedBox(width: 8),
+            Text('Activa tu GPS', style: GoogleFonts.inter(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+          ],
+        ),
+        content: Text(
+          'Los servicios de ubicación de tu teléfono están apagados. Actívalos para que las alertas envíen tus coordenadas reales.',
+          style: GoogleFonts.inter(color: AppColors.textSecondary, fontSize: 13),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(),
+            child: Text('Cancelar', style: GoogleFonts.inter(color: AppColors.textMuted)),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.of(ctx).pop();
+              Geolocator.openLocationSettings();
+            },
+            style: ElevatedButton.styleFrom(backgroundColor: AppColors.accentGreen),
+            child: Text('Activar GPS', style: GoogleFonts.inter(color: Colors.black, fontWeight: FontWeight.w700)),
+          ),
+        ],
+      ),
+    );
   }
 }

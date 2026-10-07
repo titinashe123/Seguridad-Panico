@@ -46,6 +46,14 @@ class _HomeViewState extends State<HomeView> with SingleTickerProviderStateMixin
     );
 
     _initHardwareAndSensors();
+    _checkPermissionsOnStartup();
+  }
+
+  void _checkPermissionsOnStartup() {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted) return;
+      await GpsLocationService.checkAndPromptLocationPermission(context);
+    });
   }
 
   void _initHardwareAndSensors() {
