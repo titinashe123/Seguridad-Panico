@@ -90,8 +90,9 @@ class _RegisterViewState extends State<RegisterView> {
       _showError('Contraseña incorrecta');
       return;
     }
-    if (pin.isEmpty || pin.length != 4) {
-      _showError('El PIN secreto debe ser de exactamente 4 dígitos.');
+    final pinSecurityError = AuthService.validatePinSecurity(pin);
+    if (pinSecurityError != null) {
+      _showError(pinSecurityError);
       return;
     }
     if (!_acceptTerms) {
@@ -883,13 +884,22 @@ class _RegisterViewState extends State<RegisterView> {
                         letterSpacing: 6,
                       ),
                       decoration: const InputDecoration(
-                        hintText: '4 dígitos (ej. 1234)',
+                        hintText: '4 dígitos no predecibles',
                         counterText: '',
                         prefixIcon: Icon(
                           Icons.pin_outlined,
                           color: AppColors.accentOrange,
                           size: 20,
                         ),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Por seguridad, evita secuencias (1234), números repetidos (0000) o tu año de nacimiento.',
+                      style: GoogleFonts.inter(
+                        fontSize: 11,
+                        color: AppColors.textMuted,
+                        fontStyle: FontStyle.italic,
                       ),
                     ),
 

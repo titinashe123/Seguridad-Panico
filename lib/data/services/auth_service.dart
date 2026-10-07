@@ -257,6 +257,11 @@ class AuthService {
     final cleanPassword = password.trim();
     final cleanPin = pin.trim();
 
+    final pinSecurityError = validatePinSecurity(cleanPin);
+    if (pinSecurityError != null) {
+      return AuthResult(success: false, errorMessage: pinSecurityError);
+    }
+
     // 1. Intento primario con Edge Function de Seguridad
     try {
       final response = await http
@@ -604,7 +609,7 @@ class AuthService {
     final cleanDni = dni.trim();
     final cleanPin = newPin.trim();
 
-    if (cleanPin.length != 4 || int.tryParse(cleanPin) == null) {
+    if (validatePinSecurity(cleanPin) != null) {
       return false;
     }
 
@@ -629,6 +634,43 @@ class AuthService {
     }
 
     return true;
+  }
+
+  /// Valida si un PIN es débil o fácil de adivinar (PDF Seguridad Pisco - Punto 2)
+  static String? validatePinSecurity(String pin) {
+    final clean = pin.trim();
+    if (clean.length != 4 || !RegExp(r'^\d{4}$').hasMatch(clean)) {
+      return 'El PIN debe tener exactamente 4 dígitos numéricos.';
+    }
+
+    // 1. Dígitos idénticos (0000, 1111, 2222, etc.)
+    if (clean[0] == clean[1] && clean[1] == clean[2] && clean[2] == clean[3]) {
+      return 'PIN inseguro: no utilices 4 dígitos repetidos (ej. ${clean[0] * 4}).';
+    }
+
+    // 2. Secuencias consecutivas ascendentes o descendentes (1234, 4321, 0123, etc.)
+    final d0 = int.parse(clean[0]);
+    final d1 = int.parse(clean[1]);
+    final d2 = int.parse(clean[2]);
+    final d3 = int.parse(clean[3]);
+
+    if ((d1 == d0 + 1 && d2 == d1 + 1 && d3 == d2 + 1) ||
+        (d1 == d0 - 1 && d2 == d1 - 1 && d3 == d2 - 1)) {
+      return 'PIN inseguro: no utilices secuencias consecutivas (como 1234 o 4321).';
+    }
+
+    // 3. Patrones repetitivos obvios (1212, 1010, 6969, etc.)
+    if (clean.substring(0, 2) == clean.substring(2, 4)) {
+      return 'PIN inseguro: no utilices combinaciones repetitivas como $clean.';
+    }
+
+    // 4. Años comunes de nacimiento (1940 - 2026)
+    final year = int.tryParse(clean);
+    if (year != null && year >= 1940 && year <= 2026) {
+      return 'PIN inseguro: por motivos de seguridad no uses tu año de nacimiento ($clean).';
+    }
+
+    return null;
   }
 }
 

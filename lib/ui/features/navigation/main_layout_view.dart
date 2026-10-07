@@ -1245,6 +1245,12 @@ class _ProfileViewState extends State<_ProfileView> {
                             return;
                           }
 
+                          final pinSecError = AuthService.validatePinSecurity(nPin);
+                          if (pinSecError != null) {
+                            setDState(() => errorMessage = pinSecError);
+                            return;
+                          }
+
                           setDState(() {
                             isSaving = true;
                             errorMessage = null;
@@ -1597,6 +1603,12 @@ class _ProfileViewState extends State<_ProfileView> {
 
                             if (nPin != cPin) {
                               setDState(() => errorMessage = 'Los pines ingresados no coinciden.');
+                              return;
+                            }
+
+                            final pinSecError = AuthService.validatePinSecurity(nPin);
+                            if (pinSecError != null) {
+                              setDState(() => errorMessage = pinSecError);
                               return;
                             }
 
